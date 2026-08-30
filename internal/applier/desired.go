@@ -8,7 +8,9 @@ import (
 	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
 )
 
-// desiredProfiles reconstructs the complete profiles.json from all active DB users.
+// desiredProfiles builds the panel-managed slice of profiles.json (active DB
+// users only). deploy/apply-profiles.sh merges this with any existing
+// non-panel profiles (e.g. "default") before installing the live file.
 func desiredProfiles(ctx context.Context, s userLister, cfg *config.Config) (*ProfilesFile, error) {
 	users, err := s.ListUsers(ctx)
 	if err != nil {

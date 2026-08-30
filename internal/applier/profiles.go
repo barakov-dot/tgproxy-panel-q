@@ -1,6 +1,8 @@
 // Package applier is the only package that touches live tproxy-server host state.
-// It recomputes the complete desired profile list from the DB and hands it to the
-// privileged apply-profiles.sh script via sudo. See ARCHITECTURE.md and plan.md §7.
+// It builds the panel-managed profile slice from the DB and hands it to the
+// privileged apply-profiles.sh script via sudo, which merges it with any
+// pre-existing non-panel profiles before writing profiles.json.
+// See ARCHITECTURE.md and plan.md §7.
 package applier
 
 import (
@@ -8,7 +10,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
+
+// panelProfileName matches profiles owned by tgproxy-panel (user_<telegram_id>).
+var panelProfileName = regexp.MustCompile(`^user_\d+$`)
+
+// IsPanelManagedProfile reports whether name is in the panel's namespace.
+func IsPanelManagedProfile(name string) bool {
+	return panelProfileName.MatchString(name)
+}
 
 // Profile mirrors one entry of profiles.json.
 type Profile struct {
@@ -58,6 +69,33 @@ func (pf *ProfilesFile) AddProfile(p Profile) error {
 	}
 	pf.Profiles = append(pf.Profiles, p)
 	return nil
+}
+
+// MergePanelProfiles keeps non-panel profiles from current and replaces all
+// panel-managed entries (user_<telegram_id>) with those from panel.
+func MergePanelProfiles(current, panel *ProfilesFile) (*ProfilesFile, error) {
+	merged := &ProfilesFile{Profiles: make([]Profile, 0)}
+
+	if current != nil {
+		for _, p := range current.Profiles {
+			if IsPanelManagedProfile(p.Name) {
+				continue
+			}
+			if err := merged.AddProfile(p); err != nil {
+				return nil, fmt.Errorf("applier: merge foreign profile %q: %w", p.Name, err)
+			}
+		}
+	}
+
+	if panel != nil {
+		for _, p := range panel.Profiles {
+			if err := merged.AddProfile(p); err != nil {
+				return nil, fmt.Errorf("applier: merge panel profile %q: %w", p.Name, err)
+			}
+		}
+	}
+
+	return merged, nil
 }
 
 // RemoveProfile deletes the profile named name.

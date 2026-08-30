@@ -149,3 +149,88 @@ func TestReadProfiles_InvalidJSON(t *testing.T) {
 		t.Errorf("error = %q", err.Error())
 	}
 }
+
+func TestIsPanelManagedProfile(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"user_123456789", true},
+		{"user_1", true},
+		{"default", false},
+		{"user_", false},
+		{"user_abc", false},
+		{"admin", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPanelManagedProfile(tt.name); got != tt.want {
+				t.Errorf("IsPanelManagedProfile(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMergePanelProfiles(t *testing.T) {
+	defaultProfile := Profile{
+		Name: "default", Secret: "000102030405060708090a0b0c0d0e0f",
+		Backend: "127.0.0.1:2398", CarrierMode: "https",
+	}
+	panelProfile := Profile{
+		Name: "user_93455874", Secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		Backend: "127.0.0.1:2398", CarrierMode: "https",
+	}
+	stalePanel := Profile{
+		Name: "user_999", Secret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Backend: "127.0.0.1:2398", CarrierMode: "https",
+	}
+
+	tests := []struct {
+		name    string
+		current *ProfilesFile
+		panel   *ProfilesFile
+		want    []string
+	}{
+		{
+			name:    "panel only on empty current",
+			current: nil,
+			panel:   &ProfilesFile{Profiles: []Profile{panelProfile}},
+			want:    []string{"user_93455874"},
+		},
+		{
+			name:    "preserves default and adds panel user",
+			current: &ProfilesFile{Profiles: []Profile{defaultProfile}},
+			panel:   &ProfilesFile{Profiles: []Profile{panelProfile}},
+			want:    []string{"default", "user_93455874"},
+		},
+		{
+			name:    "replaces stale panel profile keeps default",
+			current: &ProfilesFile{Profiles: []Profile{defaultProfile, stalePanel}},
+			panel:   &ProfilesFile{Profiles: []Profile{panelProfile}},
+			want:    []string{"default", "user_93455874"},
+		},
+		{
+			name:    "no panel users keeps foreign only",
+			current: &ProfilesFile{Profiles: []Profile{defaultProfile, stalePanel}},
+			panel:   &ProfilesFile{},
+			want:    []string{"default"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MergePanelProfiles(tt.current, tt.panel)
+			if err != nil {
+				t.Fatalf("MergePanelProfiles() error = %v", err)
+			}
+			if len(got.Profiles) != len(tt.want) {
+				t.Fatalf("len = %d, want %d: %+v", len(got.Profiles), len(tt.want), got.Profiles)
+			}
+			for i, name := range tt.want {
+				if got.Profiles[i].Name != name {
+					t.Errorf("profile[%d].Name = %q, want %q", i, got.Profiles[i].Name, name)
+				}
+			}
+		})
+	}
+}

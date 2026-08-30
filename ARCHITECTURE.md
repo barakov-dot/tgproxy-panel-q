@@ -11,7 +11,7 @@ Reference copies of upstream tproxy-server files (for Caddyfile patcher / profil
 
 | Component | Owned by panel | Notes |
 |-----------|----------------|-------|
-| `/etc/tproxy-server/profiles.json` | **write** (via sudo script) | One profile per user; shared `backend` |
+| `/etc/tproxy-server/profiles.json` | **write** (via sudo script) | Panel adds `user_<id>` entries; pre-existing profiles (e.g. `default`) are preserved |
 | `/etc/tproxy-server/config.json` | read-only | Global limits; never modified |
 | `/etc/caddy/Caddyfile` | patch once at install | Adds secret path → `:9000` |
 | `tproxy-server` systemd unit | restart only | No live reload; restarts drop all sessions |
@@ -126,11 +126,14 @@ tgproxy-panel ALL=(root) NOPASSWD: /opt/tgproxy-panel/bin/apply-profiles.sh
 `apply-profiles.sh` (root-owned, 0755):
 
 1. Validate candidate JSON path argument
-2. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
-3. Rotate backups (keep last `BACKUP_KEEP`)
-4. Atomic install to `$TPROXY_PROFILES_PATH` with correct owner/mode
-5. `systemctl restart tproxy-server`
-6. Exit non-zero if restart or health check fails
+2. Merge candidate (panel-managed `user_<telegram_id>` profiles only) with the **live**
+   profiles.json: keep every non-panel profile unchanged (e.g. upstream `default`),
+   replace all panel-managed entries with the candidate list
+3. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
+4. Rotate backups (keep last `BACKUP_KEEP`)
+5. Atomic install to `$TPROXY_PROFILES_PATH` with correct owner/mode
+6. `systemctl restart tproxy-server`
+7. Exit non-zero if restart fails
 
 Go `internal/applier` writes candidate to temp file, invokes
 `sudo $APPLY_PROFILES_SCRIPT <path>`.

@@ -24,6 +24,10 @@
 #   2. Cheap structural JSON pre-filter (best-effort, not authoritative).
 #   3. Authoritative validation: `tproxy-server -config ... -profiles-file
 #      <candidate> -check`.
+#   3b. Merge candidate with the live profiles.json: keep every profile whose
+#      name is NOT panel-managed (user_<telegram_id>), replace all panel-managed
+#      entries with the candidate list. This preserves pre-existing profiles
+#      such as "default" that tproxy-server shipped with.
 #   4. Backup the current live profiles.json (skip if this is the first
 #      ever run and none exists yet).
 #   5. Rotate backups, keeping only the newest BACKUP_KEEP.
@@ -105,10 +109,12 @@ readonly PROG="apply-profiles.sh"
 # Temp files created along the way, cleaned up on every exit path.
 tmp_install=""
 tmp_restore=""
+tmp_merged=""
 # shellcheck disable=SC2329  # invoked indirectly via `trap ... EXIT` below
 cleanup() {
     [ -n "$tmp_install" ] && rm -f "$tmp_install"
     [ -n "$tmp_restore" ] && rm -f "$tmp_restore"
+    [ -n "$tmp_merged" ] && rm -f "$tmp_merged"
     # Without this, `set -e` turns the false result of a no-op `[ -n "" ] &&
     # ...` above (the common case: nothing left to clean up) into this
     # function's return status, which — because it runs via `trap ... EXIT`
@@ -192,6 +198,74 @@ if ! check_stderr="$("$TPROXY_SERVER_BIN" -config "$TPROXY_CONFIG_PATH" -profile
     die "candidate failed tproxy-server -check validation"
 fi
 info "tproxy-server -check passed"
+
+# --- 3b. Merge panel candidate with existing non-panel profiles ---
+
+merged_tmp="$(mktemp "${BACKUP_DIR}/.profiles.merged.XXXXXX")"
+tmp_merged="$merged_tmp"
+
+merge_profiles() {
+    local current_path="$1" candidate_path="$2" out_path="$3"
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$current_path" "$candidate_path" "$out_path" <<'PY'
+import json, re, sys
+
+current_path, candidate_path, out_path = sys.argv[1:4]
+panel_name = re.compile(r"^user_\d+$")
+
+candidate = json.load(open(candidate_path, encoding="utf-8"))
+current = {"profiles": []}
+if current_path and current_path != "-":
+    try:
+        with open(current_path, encoding="utf-8") as f:
+            current = json.load(f)
+    except FileNotFoundError:
+        pass
+
+foreign = [p for p in current.get("profiles", []) if not panel_name.match(p.get("name", ""))]
+merged = {"profiles": foreign + candidate.get("profiles", [])}
+
+names, secrets = set(), set()
+for p in merged["profiles"]:
+    name = p.get("name", "")
+    secret = p.get("secret", "")
+    if not name or not secret:
+        print(f"{name!r}: profile missing name or secret", file=sys.stderr)
+        sys.exit(1)
+    if name in names:
+        print(f"duplicate profile name {name!r}", file=sys.stderr)
+        sys.exit(1)
+    if secret in secrets:
+        print(f"duplicate secret for profile {name!r}", file=sys.stderr)
+        sys.exit(1)
+    names.add(name)
+    secrets.add(secret)
+
+with open(out_path, "w", encoding="utf-8") as f:
+    json.dump(merged, f, indent=2)
+    f.write("\n")
+PY
+        return $?
+    fi
+    die "python3 is required to merge panel profiles with existing profiles.json (preserves non-panel entries like \"default\")"
+}
+
+current_for_merge="-"
+if [ -e "$TPROXY_PROFILES_PATH" ]; then
+    current_for_merge="$TPROXY_PROFILES_PATH"
+fi
+
+if ! merge_profiles "$current_for_merge" "$candidate" "$merged_tmp"; then
+    die "failed to merge candidate with existing profiles.json"
+fi
+candidate="$merged_tmp"
+info "merged panel candidate with existing non-panel profiles ($(wc -c < "$candidate") bytes)"
+
+if ! check_stderr="$("$TPROXY_SERVER_BIN" -config "$TPROXY_CONFIG_PATH" -profiles-file "$candidate" -check 2>&1 >/dev/null)"; then
+    echo "$check_stderr" >&2
+    die "merged profiles failed tproxy-server -check validation"
+fi
+info "tproxy-server -check passed on merged profiles"
 
 # --- 4. Backup current live profiles.json ---
 
