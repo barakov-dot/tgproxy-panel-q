@@ -603,13 +603,26 @@ EOF
 install -m 0600 -o tgproxy-panel -g tgproxy-panel "$env_tmp" "$install_dir/.env"
 
 # --- 17. systemd unit, templated with the real install dir ---
+#
+# ReadWritePaths must also include profiles.json's own directory (normally
+# /etc/tproxy-server): ProtectSystem=strict makes the whole filesystem
+# read-only at the mount/namespace level for every process in this unit's
+# tree, INCLUDING a root-escalated `sudo apply-profiles.sh` child — sudo
+# changes the process's UID/GID, not its mount namespace, so root still
+# can't write through a read-only bind mount without this. DAC permissions
+# (config_path's group-read grant from step 11 above, profiles.json's own
+# 0400 root:tproxy) are unaffected either way; this only concerns the
+# separate mount-level restriction. Confirmed against a real install:
+# without it, apply-profiles.sh's own mktemp call fails with "Read-only
+# file system" even though it's genuinely running as root by that point.
+profiles_dir="$(dirname -- "$profiles_path")"
 
 service_tmp="$(new_tmp)"
 sed \
     -e "s|^WorkingDirectory=.*|WorkingDirectory=${install_dir}|" \
     -e "s|^EnvironmentFile=.*|EnvironmentFile=${install_dir}/.env|" \
     -e "s|^ExecStart=.*|ExecStart=${install_dir}/tgproxy-panel|" \
-    -e "s|^ReadWritePaths=.*|ReadWritePaths=${install_dir}/data ${install_dir}/backup|" \
+    -e "s|^ReadWritePaths=.*|ReadWritePaths=${install_dir}/data ${install_dir}/backup ${profiles_dir}|" \
     "$repo_root/deploy/tgproxy-panel.service" >"$service_tmp"
 install -m 0644 -o root -g root "$service_tmp" /etc/systemd/system/tgproxy-panel.service
 systemctl daemon-reload

@@ -43,6 +43,18 @@ a real target host, but do not silently assume they've changed.
   secrets-free settings file only — it does not and must not grant any access to the real
   `profiles.json` (`0400`, no group bits at all), which the panel process still never
   reads directly (see the declarative, DB-is-source-of-truth design below).
+- **`deploy/tgproxy-panel.service`'s `ProtectSystem=strict` makes the whole filesystem
+  read-only at the mount/namespace level for every process in the unit's tree — including
+  a root-escalated `sudo apply-profiles.sh` child.** `sudo` changes UID/GID, not the mount
+  namespace, so even genuinely running as root, that child still can't write through a
+  read-only bind mount without an explicit `ReadWritePaths=` grant. Confirmed against a
+  real install: without `/etc/tproxy-server` (profiles.json's directory) in
+  `ReadWritePaths=`, `apply-profiles.sh`'s `mktemp` call fails with "Read-only file
+  system" even though `-check` validation and the `sudo` escalation itself both succeeded.
+  `deploy/install.sh` templates the real profiles.json directory into `ReadWritePaths=`
+  alongside `data/`/`backup/`. This is orthogonal to the config.json group-read fact
+  above: that one is a DAC (owner/group/mode) restriction, unaffected by `ReadWritePaths`;
+  this one is a mount-level restriction, unaffected by DAC/UID.
 - **The tproxy-server binary validates its own config+profiles**: `tproxy-server -config
   /etc/tproxy-server/config.json -profiles-file /etc/tproxy-server/profiles.json -check`.
   Shell out to this instead of hand-rolling profile-schema validation — it's the actual
