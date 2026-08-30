@@ -28,6 +28,9 @@
 #      name is NOT panel-managed (user_<telegram_id>), replace all panel-managed
 #      entries with the candidate list. This preserves pre-existing profiles
 #      such as "default" that tproxy-server shipped with.
+#   3c. Verify every profile backend port is listening on loopback.
+#   3d. Sync MTProxy `-S` secrets from merged profiles (multi-secret on one
+#       mtproto-proxy) and restart mtproxy when the secret set changed.
 #   4. Backup the current live profiles.json (skip if this is the first
 #      ever run and none exists yet).
 #   5. Rotate backups, keeping only the newest BACKUP_KEEP.
@@ -65,6 +68,8 @@
 #                     TPROXY_SERVER_BIN=/usr/local/bin/tproxy-server
 #                     BACKUP_DIR=/opt/tgproxy-panel/backup
 #                     BACKUP_KEEP=100
+#                     MTPROXY_SERVICE_NAME=mtproxy
+#                     MTPROXY_ENV_FILE=/etc/mtproxy/mtproxy.env
 #   Variable names: must match exactly (same spelling as internal/config's
 #                   env vars for the overlapping settings). Any subset may
 #                   be present; unset ones keep their hardcoded default
@@ -89,6 +94,8 @@ TPROXY_SERVICE_NAME="tproxy-server"
 TPROXY_SERVER_BIN="/usr/local/bin/tproxy-server"
 BACKUP_DIR="/opt/tgproxy-panel/backup"
 BACKUP_KEEP=100
+MTPROXY_SERVICE_NAME="mtproxy"
+MTPROXY_ENV_FILE="/etc/mtproxy/mtproxy.env"
 
 # install.sh-generated overrides, if present.
 ENV_FILE="/opt/tgproxy-panel/apply-profiles.env"
@@ -223,7 +230,18 @@ if current_path and current_path != "-":
         pass
 
 foreign = [p for p in current.get("profiles", []) if not panel_name.match(p.get("name", ""))]
-merged = {"profiles": foreign + candidate.get("profiles", [])}
+template = foreign[0] if foreign else None
+panel_profiles = []
+for p in candidate.get("profiles", []):
+    synced = dict(p)
+    if template:
+        backend = template.get("backend")
+        if backend:
+            synced["backend"] = backend
+        carrier = template.get("carrier_mode") or "https"
+        synced["carrier_mode"] = carrier
+    panel_profiles.append(synced)
+merged = {"profiles": foreign + panel_profiles}
 
 names, secrets = set(), set()
 for p in merged["profiles"]:
@@ -268,6 +286,153 @@ if ! check_stderr="$("$TPROXY_SERVER_BIN" -config "$TPROXY_CONFIG_PATH" -profile
     die "merged profiles failed tproxy-server -check validation"
 fi
 info "tproxy-server -check passed on merged profiles"
+
+# --- 3c. Verify MTProxy backend port is listening ---
+
+if command -v ss >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    while IFS= read -r backend; do
+        [ -n "$backend" ] || continue
+        port="${backend##*:}"
+        if ! ss -lnt 2>/dev/null | grep -Eq ":${port}\b"; then
+            die "profile backend ${backend} is not listening on loopback (MTProxy may be down or on another port)"
+        fi
+    done < <(python3 - "$candidate" <<'PY'
+import json, sys
+backends = set()
+for p in json.load(open(sys.argv[1], encoding="utf-8")).get("profiles", []):
+    b = p.get("backend")
+    if b:
+        backends.add(b)
+for b in sorted(backends):
+    print(b)
+PY
+)
+    info "all profile backend ports are listening"
+fi
+
+# --- 3d. Sync MTProxy secrets (multi -S on one mtproto-proxy) ---
+
+sync_mtproxy_secrets() {
+    local profiles_path="$1"
+    local secrets_tmp env_tmp count
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        die "python3 is required to sync MTProxy secrets from profiles.json"
+    fi
+    if ! systemctl list-unit-files --no-legend "$MTPROXY_SERVICE_NAME.service" 2>/dev/null | grep -q '^'; then
+        info "MTProxy unit $MTPROXY_SERVICE_NAME.service not found, skipping secret sync"
+        return 0
+    fi
+
+    secrets_tmp="$(mktemp "${BACKUP_DIR}/.mtproxy-secrets.XXXXXX")"
+    env_tmp="$(mktemp "${BACKUP_DIR}/.mtproxy-env.XXXXXX")"
+    if ! count="$(python3 - "$profiles_path" "$MTPROXY_ENV_FILE" "$secrets_tmp" "$env_tmp" <<'PY'
+import json, os, re, sys
+
+profiles_path, env_path, secrets_cmp_path, env_out_path = sys.argv[1:5]
+secret_re = re.compile(r"^(?:dd)?[0-9a-f]{32}$")
+
+seen = []
+for profile in json.load(open(profiles_path, encoding="utf-8")).get("profiles", []):
+    raw = str(profile.get("secret", "")).strip().lower()
+    if raw.startswith("dd") and len(raw) == 34:
+        raw = raw[2:]
+    if not secret_re.fullmatch(raw):
+        name = profile.get("name", "?")
+        print(f"profile {name!r}: invalid MTProxy secret format", file=sys.stderr)
+        sys.exit(1)
+    if raw not in seen:
+        seen.append(raw)
+
+if not seen:
+    print("profiles.json contains no secrets for MTProxy sync", file=sys.stderr)
+    sys.exit(1)
+
+with open(secrets_cmp_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(seen) + "\n")
+
+lines = []
+if os.path.isfile(env_path):
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in ("MTPROXY_SECRET", "MTPROXY_SECRETS"):
+                    continue
+            lines.append(line.rstrip("\n"))
+
+while lines and not lines[-1].strip():
+    lines.pop()
+
+lines.append(f"MTPROXY_SECRET={seen[0]}")
+lines.append(f"MTPROXY_SECRETS={' '.join(seen)}")
+
+with open(env_out_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+
+print(len(seen))
+PY
+)"; then
+        rm -f "$secrets_tmp" "$env_tmp"
+        die "failed to sync MTProxy secrets from merged profiles"
+    fi
+
+    if [ -f "$MTPROXY_ENV_FILE" ]; then
+        current_secrets_tmp="$(mktemp "${BACKUP_DIR}/.mtproxy-secrets-current.XXXXXX")"
+        if python3 - "$MTPROXY_ENV_FILE" "$current_secrets_tmp" <<'PY'
+import os, sys
+
+env_path, out_path = sys.argv[1:3]
+seen = []
+if os.path.isfile(env_path):
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("MTPROXY_SECRETS="):
+                for secret in stripped.split("=", 1)[1].split():
+                    secret = secret.strip().lower()
+                    if secret and secret not in seen:
+                        seen.append(secret)
+                break
+    if not seen:
+        with open(env_path, encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("MTPROXY_SECRET="):
+                    secret = stripped.split("=", 1)[1].strip().lower()
+                    if secret:
+                        seen.append(secret)
+                    break
+
+with open(out_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(seen) + "\n")
+PY
+        then
+            if cmp -s "$secrets_tmp" "$current_secrets_tmp"; then
+                rm -f "$secrets_tmp" "$env_tmp" "$current_secrets_tmp"
+                info "MTProxy secrets unchanged ($count secret(s))"
+                return 0
+            fi
+        fi
+        rm -f "$current_secrets_tmp"
+    fi
+
+    install -d -m 0750 -o root -g mtproxy /etc/mtproxy
+    install -m 0440 -o root -g mtproxy "$env_tmp" "$MTPROXY_ENV_FILE"
+    rm -f "$secrets_tmp" "$env_tmp"
+    info "updated $MTPROXY_ENV_FILE ($count secret(s))"
+
+    if ! systemctl daemon-reload; then
+        die "systemctl daemon-reload failed after MTProxy secrets update"
+    fi
+    if ! systemctl restart "$MTPROXY_SERVICE_NAME"; then
+        die "systemctl restart $MTPROXY_SERVICE_NAME failed after secrets update"
+    fi
+    info "restarted $MTPROXY_SERVICE_NAME with $count secret(s)"
+}
+
+sync_mtproxy_secrets "$candidate"
 
 # --- 4. Backup current live profiles.json ---
 

@@ -186,10 +186,11 @@ func TestMergePanelProfiles(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		current *ProfilesFile
-		panel   *ProfilesFile
-		want    []string
+		name        string
+		current     *ProfilesFile
+		panel       *ProfilesFile
+		want        []string
+		wantBackend string
 	}{
 		{
 			name:    "panel only on empty current",
@@ -202,6 +203,19 @@ func TestMergePanelProfiles(t *testing.T) {
 			current: &ProfilesFile{Profiles: []Profile{defaultProfile}},
 			panel:   &ProfilesFile{Profiles: []Profile{panelProfile}},
 			want:    []string{"default", "user_93455874"},
+		},
+		{
+			name: "panel profile inherits backend from default",
+			current: &ProfilesFile{Profiles: []Profile{{
+				Name: "default", Secret: "000102030405060708090a0b0c0d0e0f",
+				Backend: "127.0.0.1:2401", CarrierMode: "https",
+			}}},
+			panel: &ProfilesFile{Profiles: []Profile{{
+				Name: "user_1", Secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				Backend: "127.0.0.1:2398", CarrierMode: "https",
+			}}},
+			want:        []string{"default", "user_1"},
+			wantBackend: "127.0.0.1:2401",
 		},
 		{
 			name:    "replaces stale panel profile keeps default",
@@ -229,6 +243,13 @@ func TestMergePanelProfiles(t *testing.T) {
 			for i, name := range tt.want {
 				if got.Profiles[i].Name != name {
 					t.Errorf("profile[%d].Name = %q, want %q", i, got.Profiles[i].Name, name)
+				}
+			}
+			if tt.wantBackend != "" {
+				for _, p := range got.Profiles {
+					if IsPanelManagedProfile(p.Name) && p.Backend != tt.wantBackend {
+						t.Errorf("panel profile %q backend = %q, want %q", p.Name, p.Backend, tt.wantBackend)
+					}
 				}
 			}
 		})

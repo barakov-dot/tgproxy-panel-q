@@ -88,7 +88,11 @@ func MergePanelProfiles(current, panel *ProfilesFile) (*ProfilesFile, error) {
 	}
 
 	if panel != nil {
+		template := foreignBackendTemplate(merged)
 		for _, p := range panel.Profiles {
+			if template != nil {
+				p = syncProfileBackend(p, *template)
+			}
 			if err := merged.AddProfile(p); err != nil {
 				return nil, fmt.Errorf("applier: merge panel profile %q: %w", p.Name, err)
 			}
@@ -96,6 +100,25 @@ func MergePanelProfiles(current, panel *ProfilesFile) (*ProfilesFile, error) {
 	}
 
 	return merged, nil
+}
+
+func foreignBackendTemplate(merged *ProfilesFile) *Profile {
+	if merged == nil || len(merged.Profiles) == 0 {
+		return nil
+	}
+	p := merged.Profiles[0]
+	return &p
+}
+
+// syncProfileBackend copies backend/carrier_mode from a working non-panel profile.
+func syncProfileBackend(p, template Profile) Profile {
+	if template.Backend != "" {
+		p.Backend = template.Backend
+	}
+	if template.CarrierMode != "" {
+		p.CarrierMode = template.CarrierMode
+	}
+	return p
 }
 
 // RemoveProfile deletes the profile named name.

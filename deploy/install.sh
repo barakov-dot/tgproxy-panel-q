@@ -135,6 +135,29 @@ prompt_default() {
 # plausible-but-not-guaranteed on a minimal Debian/Ubuntu box); prints
 # nothing and returns success either way, since every caller treats this as
 # a convenience default, never a hard requirement.
+# find_mtproxy_port prints the loopback port mtproto-proxy listens on, if any.
+find_mtproxy_port() {
+    local port=""
+    if command -v ss >/dev/null 2>&1; then
+        port="$(ss -lntp 2>/dev/null | awk '
+            /127\.0\.0\.1:[0-9]+/ && /mtproto-proxy/ {
+                if (match($0, /127\.0\.0\.1:([0-9]+)/, a)) {
+                    print a[1]
+                    exit
+                }
+            }')"
+        if [ -n "$port" ]; then
+            printf '%s' "$port"
+            return 0
+        fi
+        if ss -lnt 2>/dev/null | grep -Eq ':2398\b'; then
+            printf '2398'
+            return 0
+        fi
+    fi
+    return 1
+}
+
 json_field() {
     local file="$1" key="$2"
     [ -f "$file" ] || return 0
@@ -532,6 +555,75 @@ esac
 
 install -d -m 0755 -o root -g root /opt/tgproxy-panel/bin
 install -m 0755 -o root -g root "$repo_root/deploy/apply-profiles.sh" /opt/tgproxy-panel/bin/apply-profiles.sh
+install -m 0755 -o root -g root "$repo_root/deploy/mtproxy-exec.sh" /opt/tgproxy-panel/bin/mtproxy-exec.sh
+
+# MTProxy multi-secret: wrapper + systemd drop-in so every profile secret gets
+# its own `-S` on the single official mtproto-proxy (see apply-profiles.sh 3d).
+mtproxy_stats_port="8888"
+mtproxy_listen_port="2398"
+if mtproxy_port="$(find_mtproxy_port 2>/dev/null)"; then
+    mtproxy_listen_port="$mtproxy_port"
+fi
+if [ -f /etc/systemd/system/mtproxy.service ]; then
+    parsed_stats="$(grep -Eo '\-p[[:space:]]+[0-9]+' /etc/systemd/system/mtproxy.service 2>/dev/null | awk '{print $2}' | head -n1 || true)"
+    parsed_listen="$(grep -Eo '\-H[[:space:]]+[0-9]+' /etc/systemd/system/mtproxy.service 2>/dev/null | awk '{print $2}' | head -n1 || true)"
+    [ -n "$parsed_stats" ] && mtproxy_stats_port="$parsed_stats"
+    [ -n "$parsed_listen" ] && mtproxy_listen_port="$parsed_listen"
+fi
+if systemctl list-unit-files --no-legend mtproxy.service 2>/dev/null | grep -q '^'; then
+    install -d -m 0755 /etc/systemd/system/mtproxy.service.d
+    cat > /etc/systemd/system/mtproxy.service.d/tgproxy-panel.conf <<EOF
+[Service]
+Environment=MTPROXY_STATS_PORT=$mtproxy_stats_port
+Environment=MTPROXY_LISTEN_PORT=$mtproxy_listen_port
+ExecStart=
+ExecStart=/opt/tgproxy-panel/bin/mtproxy-exec.sh
+EOF
+    install -d -m 0750 -o root -g mtproxy /etc/mtproxy
+    if [ -f "$profiles_path" ] && command -v python3 >/dev/null 2>&1; then
+        python3 - "$profiles_path" /etc/mtproxy/mtproxy.env <<'PY' || true
+import json, os, re, sys
+
+profiles_path, env_path = sys.argv[1:3]
+secret_re = re.compile(r"^(?:dd)?[0-9a-f]{32}$")
+seen = []
+for profile in json.load(open(profiles_path, encoding="utf-8")).get("profiles", []):
+    raw = str(profile.get("secret", "")).strip().lower()
+    if raw.startswith("dd") and len(raw) == 34:
+        raw = raw[2:]
+    if secret_re.fullmatch(raw) and raw not in seen:
+        seen.append(raw)
+if not seen:
+    sys.exit(0)
+
+lines = []
+if os.path.isfile(env_path):
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in ("MTPROXY_SECRET", "MTPROXY_SECRETS"):
+                    continue
+            lines.append(line.rstrip("\n"))
+
+while lines and not lines[-1].strip():
+    lines.pop()
+
+lines.append(f"MTPROXY_SECRET={seen[0]}")
+lines.append(f"MTPROXY_SECRETS={' '.join(seen)}")
+
+with open(env_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+PY
+        [ -f /etc/mtproxy/mtproxy.env ] && \
+            chown root:mtproxy /etc/mtproxy/mtproxy.env && \
+            chmod 0440 /etc/mtproxy/mtproxy.env
+    fi
+    systemctl daemon-reload
+    systemctl restart mtproxy.service 2>/dev/null || true
+    info "configured MTProxy multi-secret wrapper (listen :${mtproxy_listen_port})"
+fi
 
 apply_profiles_env_tmp="$(new_tmp)"
 cat >"$apply_profiles_env_tmp" <<EOF
@@ -541,6 +633,8 @@ TPROXY_SERVICE_NAME=tproxy-server
 TPROXY_SERVER_BIN=$tproxy_server_bin
 BACKUP_DIR=$install_dir/backup
 BACKUP_KEEP=100
+MTPROXY_SERVICE_NAME=mtproxy
+MTPROXY_ENV_FILE=/etc/mtproxy/mtproxy.env
 EOF
 install -m 0600 -o root -g root "$apply_profiles_env_tmp" /opt/tgproxy-panel/apply-profiles.env
 
@@ -564,9 +658,16 @@ info "installed sudoers rule at /etc/sudoers.d/tgproxy-panel"
 detected_admin_listen="$(json_field "$config_path" "admin_listen")"
 tproxy_admin_url="http://${detected_admin_listen:-127.0.0.1:8081}"
 detected_backend="$(json_field "$profiles_path" "backend")"
-tproxy_backend="${detected_backend:-127.0.0.1:2398}"
 detected_carrier_mode="$(json_field "$profiles_path" "carrier_mode")"
 tproxy_carrier_mode="${detected_carrier_mode:-https}"
+if mtproxy_port="$(find_mtproxy_port 2>/dev/null)"; then
+    tproxy_backend="127.0.0.1:${mtproxy_port}"
+    info "detected MTProxy listening on loopback :${mtproxy_port}"
+elif [ -n "$detected_backend" ]; then
+    tproxy_backend="$detected_backend"
+else
+    tproxy_backend="127.0.0.1:2398"
+fi
 
 env_tmp="$(new_tmp)"
 # shellcheck disable=SC2154  # admin_login/admin_password_hash set indirectly (prompt_default / step 13)
