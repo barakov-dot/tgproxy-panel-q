@@ -3,7 +3,8 @@
 <head>
 {{template "head" .}}
 <script>
-function copyLink(btn, link) {
+function copyLink(btn) {
+  var link = btn.getAttribute('data-link');
   navigator.clipboard.writeText(link).then(function () {
     var original = btn.textContent;
     btn.textContent = "Скопировано!";

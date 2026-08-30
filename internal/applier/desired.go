@@ -4,16 +4,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/config"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
 )
 
-// desiredProfiles reconstructs the complete profiles.json content that
-// should exist on the host, purely from the DB: every user with
-// status=active, joined with the one shared backend/carrier_mode from
-// config (CLAUDE.md: "never allocate a new backend port per user"). This is
-// the entire "desired state" computation — see the package doc comment for
-// why it never reads the live file.
+// desiredProfiles reconstructs the complete profiles.json from all active DB users.
 func desiredProfiles(ctx context.Context, s userLister, cfg *config.Config) (*ProfilesFile, error) {
 	users, err := s.ListUsers(ctx)
 	if err != nil {
@@ -41,10 +36,6 @@ func desiredProfiles(ctx context.Context, s userLister, cfg *config.Config) (*Pr
 	return pf, nil
 }
 
-// userLister is the slice of *store.Store this package depends on. Kept as
-// a small interface so tests can exercise desiredProfiles without a real
-// SQLite file, though internal/applier's tests currently use a real
-// store.Store on a temp DB (cheap and exercises the real query).
 type userLister interface {
 	ListUsers(ctx context.Context) ([]*models.User, error)
 }

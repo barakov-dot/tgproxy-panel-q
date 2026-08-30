@@ -5,10 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"time"
-
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
 )
 
 type backupFile struct {
@@ -23,24 +20,6 @@ type settingsPageData struct {
 	BackupErr string
 }
 
-func (s *Server) getAutoIssue(r *http.Request) (bool, error) {
-	v, ok, err := s.store.GetSetting(r.Context(), models.SettingAutoIssue)
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		return s.cfg.AutoIssue, nil
-	}
-	b, err := strconv.ParseBool(v)
-	if err != nil {
-		return s.cfg.AutoIssue, nil
-	}
-	return b, nil
-}
-
-// listBackups reads Config.BackupDir non-recursively — the applier writes
-// flat, timestamp-named files directly into it (plan.md §7 steps 2-3), so
-// this is deliberately just os.ReadDir, no need to overthink it.
 func listBackups(dir string) ([]backupFile, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -62,7 +41,7 @@ func listBackups(dir string) ([]backupFile, error) {
 }
 
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
-	autoIssue, err := s.getAutoIssue(r)
+	autoIssue, err := s.svc.AutoIssueEnabled(r.Context())
 	if err != nil {
 		s.log.Error("get auto_issue setting", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -89,15 +68,13 @@ func (s *Server) handleSetAutoIssue(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	// A single checkbox posts "on" when checked and is simply absent from
-	// the form body when unchecked — there is no unchecked value to parse.
 	enabled := r.FormValue("auto_issue") == "on"
 
-	if err := s.store.SetSetting(r.Context(), models.SettingAutoIssue, strconv.FormatBool(enabled)); err != nil {
+	if err := s.svc.SetAutoIssue(r.Context(), enabled); err != nil {
 		s.log.Error("set auto_issue setting", "error", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
 
-	s.handleSettings(w, r)
+	http.Redirect(w, r, s.base()+"/settings", http.StatusSeeOther)
 }

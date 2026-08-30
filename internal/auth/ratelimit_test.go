@@ -104,7 +104,7 @@ func TestLoginLimiterConcurrent(t *testing.T) {
 	l := NewDefaultLoginLimiter()
 	done := make(chan struct{})
 	for i := 0; i < 20; i++ {
-		go func(i int) {
+		go func() {
 			defer func() { done <- struct{}{} }()
 			key := "concurrent-key"
 			if l.Allow(key) {
@@ -112,9 +112,27 @@ func TestLoginLimiterConcurrent(t *testing.T) {
 			} else {
 				l.RecordSuccess(key)
 			}
-		}(i)
+		}()
 	}
 	for i := 0; i < 20; i++ {
 		<-done
+	}
+}
+
+func TestDefaultLoginLimiterConstants(t *testing.T) {
+	cases := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"DefaultMaxAttempts", DefaultMaxAttempts, 5},
+		{"DefaultCooldown", DefaultCooldown, 15 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.got != tc.want {
+				t.Errorf("got %v, want %v", tc.got, tc.want)
+			}
+		})
 	}
 }

@@ -1,7 +1,4 @@
-// Package store provides SQLite-backed access to the users, settings and
-// audit_log tables (schema.sql, matching plan.md §4). There is no migration
-// framework — the schema is small and stable; startup just runs
-// CREATE TABLE IF NOT EXISTS.
+// Package store provides SQLite-backed persistence for users, settings, and audit_log.
 package store
 
 import (
@@ -10,17 +7,17 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
 	_ "modernc.org/sqlite"
 )
 
 //go:embed schema.sql
-var schema string
+var schemaSQL string
 
-// ErrNotFound is returned by lookups and updates that target a row which
-// does not exist.
+// ErrNotFound is returned when a requested row does not exist.
 var ErrNotFound = errors.New("store: not found")
 
 // Store wraps a SQLite database handle.
@@ -28,33 +25,55 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens (creating if necessary) the SQLite database at path and
-// applies the schema.
+// Open opens (creating if needed) the SQLite database at path and applies schema.sql.
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
-
-	// modernc.org/sqlite does not support concurrent writers on one file; a
-	// single pooled connection serializes all access instead of racing
-	// multiple connections into SQLITE_BUSY. Fine at this project's ~50-user
-	// scale (plan.md §13).
 	db.SetMaxOpenConns(1)
 
-	if _, err := db.ExecContext(context.Background(), schema); err != nil {
+	if err := migrate(context.Background(), db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("store: apply schema: %w", err)
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }
 
-// Close closes the underlying database handle.
+func migrate(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
+		return fmt.Errorf("store: apply schema: %w", err)
+	}
+	return nil
+}
+
+// Close closes the database.
 func (s *Store) Close() error {
 	return s.db.Close()
 }
 
 const userColumns = `id, telegram_id, username, first_name, last_name, status, profile_name, secret, requested_at, issued_at, revoked_at`
+
+// UserListFilter optionally restricts ListUsers results.
+type UserListFilter struct {
+	Status *models.UserStatus
+	Query  string
+}
+
+// UserListSort controls ListUsers ordering. Column must be one of the allowed sort columns.
+type UserListSort struct {
+	Column string
+	Desc   bool
+}
+
+var allowedSortColumns = map[string]string{
+	"id":           "id",
+	"telegram_id":  "telegram_id",
+	"username":     "username",
+	"status":       "status",
+	"requested_at": "requested_at",
+	"issued_at":    "issued_at",
+}
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -115,8 +134,7 @@ func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
 
-// CreateUser inserts a new pending request for telegramID. username,
-// firstName and lastName may be nil. requested_at is set to now.
+// CreateUser inserts a new pending user request.
 func (s *Store) CreateUser(ctx context.Context, telegramID int64, username, firstName, lastName *string) (*models.User, error) {
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO users (telegram_id, username, first_name, last_name, status, requested_at)
@@ -132,7 +150,7 @@ func (s *Store) CreateUser(ctx context.Context, telegramID int64, username, firs
 	return s.GetUserByID(ctx, id)
 }
 
-// GetUserByID returns the user with the given primary key, or ErrNotFound.
+// GetUserByID returns a user by primary key.
 func (s *Store) GetUserByID(ctx context.Context, id int64) (*models.User, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id = ?`, id)
 	u, err := scanUser(row)
@@ -145,8 +163,7 @@ func (s *Store) GetUserByID(ctx context.Context, id int64) (*models.User, error)
 	return u, nil
 }
 
-// GetUserByTelegramID returns the user with the given Telegram ID, or
-// ErrNotFound.
+// GetUserByTelegramID returns a user by Telegram ID.
 func (s *Store) GetUserByTelegramID(ctx context.Context, telegramID int64) (*models.User, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE telegram_id = ?`, telegramID)
 	u, err := scanUser(row)
@@ -159,11 +176,39 @@ func (s *Store) GetUserByTelegramID(ctx context.Context, telegramID int64) (*mod
 	return u, nil
 }
 
-// ListUsers returns every user, most recently requested first. Sorting by
-// other columns and searching are left to the caller (httpserver, over this
-// slice or with its own query) per CLAUDE.md's stage-2 scope.
-func (s *Store) ListUsers(ctx context.Context) ([]*models.User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+userColumns+` FROM users ORDER BY requested_at DESC, id DESC`)
+// ListUsers returns users matching filter, ordered by sort.
+func (s *Store) ListUsers(ctx context.Context, filter UserListFilter, sort UserListSort) ([]*models.User, error) {
+	query := `SELECT ` + userColumns + ` FROM users WHERE 1=1`
+	args := []any{}
+
+	if filter.Status != nil {
+		query += ` AND status = ?`
+		args = append(args, string(*filter.Status))
+	}
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		like := "%" + q + "%"
+		query += ` AND (
+			CAST(telegram_id AS TEXT) LIKE ? OR
+			IFNULL(username, '') LIKE ? OR
+			IFNULL(first_name, '') LIKE ? OR
+			IFNULL(last_name, '') LIKE ?
+		)`
+		args = append(args, like, like, like, like)
+	}
+
+	col := "requested_at"
+	if sort.Column != "" {
+		if mapped, ok := allowedSortColumns[sort.Column]; ok {
+			col = mapped
+		}
+	}
+	dir := "ASC"
+	if sort.Desc {
+		dir = "DESC"
+	}
+	query += fmt.Sprintf(` ORDER BY %s %s, id DESC`, col, dir)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: list users: %w", err)
 	}
@@ -183,84 +228,77 @@ func (s *Store) ListUsers(ctx context.Context) ([]*models.User, error) {
 	return out, nil
 }
 
-// IssueUser grants telegramID an active profile: sets profile_name, secret,
-// status=active and issued_at=now. The user must already exist (created via
-// CreateUser when the request first came in); returns ErrNotFound otherwise.
-func (s *Store) IssueUser(ctx context.Context, telegramID int64, profileName, secret string) (*models.User, error) {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE users SET profile_name = ?, secret = ?, status = ?, issued_at = ?
-		WHERE telegram_id = ?`,
-		profileName, secret, string(models.StatusActive), formatTime(time.Now()), telegramID)
+// UpdateUserStatus sets a user's status and related timestamps.
+func (s *Store) UpdateUserStatus(ctx context.Context, id int64, status models.UserStatus) (*models.User, error) {
+	if !status.Valid() {
+		return nil, fmt.Errorf("store: update user status id=%d: invalid status %q", id, status)
+	}
+
+	now := formatTime(time.Now())
+	var query string
+	var args []any
+
+	switch status {
+	case models.StatusPending:
+		query = `UPDATE users SET status = ?, requested_at = ? WHERE id = ?`
+		args = []any{string(status), now, id}
+	case models.StatusActive:
+		query = `UPDATE users SET status = ? WHERE id = ?`
+		args = []any{string(status), id}
+	case models.StatusRevoked:
+		query = `UPDATE users SET status = ?, revoked_at = ?, profile_name = NULL, secret = NULL WHERE id = ?`
+		args = []any{string(status), now, id}
+	case models.StatusDenied:
+		query = `UPDATE users SET status = ? WHERE id = ?`
+		args = []any{string(status), id}
+	}
+
+	res, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: issue user telegram_id=%d: %w", telegramID, err)
+		return nil, fmt.Errorf("store: update user status id=%d: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrNotFound
 	}
-	return s.GetUserByTelegramID(ctx, telegramID)
+	return s.GetUserByID(ctx, id)
 }
 
-// RevokeUser marks telegramID's profile revoked: status=revoked,
-// revoked_at=now, and clears profile_name/secret.
-//
-// Design note: users.telegram_id is UNIQUE, so a given Telegram user always
-// maps to exactly one row that IssueUser updates in place — a future
-// re-issue for the same telegram_id never needs profile_name/secret freed
-// up to avoid a UNIQUE conflict on *this* row. We still null them on revoke
-// because (1) the secret is dead the moment it's removed from
-// profiles.json, so there's no reason to keep it sitting in the DB in
-// plaintext, and (2) it frees those UNIQUE slots so a brand-new, unrelated
-// user's randomly generated secret can never collide with a long-revoked
-// one. requested_at/issued_at/revoked_at plus the audit_log rows already
-// preserve the history that this user was issued and later revoked.
-func (s *Store) RevokeUser(ctx context.Context, telegramID int64) (*models.User, error) {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE users SET profile_name = NULL, secret = NULL, status = ?, revoked_at = ?
-		WHERE telegram_id = ?`,
-		string(models.StatusRevoked), formatTime(time.Now()), telegramID)
+// SetUserProfile sets profile_name and secret for a user. When setActive is true,
+// status becomes active and issued_at is set to now.
+func (s *Store) SetUserProfile(ctx context.Context, id int64, profileName, secret string, setActive bool) (*models.User, error) {
+	var query string
+	var args []any
+	if setActive {
+		query = `UPDATE users SET profile_name = ?, secret = ?, status = ?, issued_at = ? WHERE id = ?`
+		args = []any{profileName, secret, string(models.StatusActive), formatTime(time.Now()), id}
+	} else {
+		query = `UPDATE users SET profile_name = ?, secret = ? WHERE id = ?`
+		args = []any{profileName, secret, id}
+	}
+
+	res, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("store: revoke user telegram_id=%d: %w", telegramID, err)
+		return nil, fmt.Errorf("store: set user profile id=%d: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrNotFound
 	}
-	return s.GetUserByTelegramID(ctx, telegramID)
+	return s.GetUserByID(ctx, id)
 }
 
-// DenyUser marks a pending request denied, without touching any other
-// field.
-func (s *Store) DenyUser(ctx context.Context, telegramID int64) (*models.User, error) {
-	res, err := s.db.ExecContext(ctx, `UPDATE users SET status = ? WHERE telegram_id = ?`,
-		string(models.StatusDenied), telegramID)
+// ClearUserProfile removes profile_name and secret without changing status.
+func (s *Store) ClearUserProfile(ctx context.Context, id int64) (*models.User, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET profile_name = NULL, secret = NULL WHERE id = ?`, id)
 	if err != nil {
-		return nil, fmt.Errorf("store: deny user telegram_id=%d: %w", telegramID, err)
+		return nil, fmt.Errorf("store: clear user profile id=%d: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrNotFound
 	}
-	return s.GetUserByTelegramID(ctx, telegramID)
+	return s.GetUserByID(ctx, id)
 }
 
-// SetPending resets telegramID's row to a fresh pending request:
-// status=pending, requested_at=now. Used when a previously revoked or
-// denied user re-requests access with auto-issue off, so the request
-// reappears in the panel's pending queue and an admin decision is expected
-// again, instead of silently staying revoked/denied while a notification is
-// sent (see internal/service.RequestProxy).
-func (s *Store) SetPending(ctx context.Context, telegramID int64) (*models.User, error) {
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE users SET status = ?, requested_at = ? WHERE telegram_id = ?`,
-		string(models.StatusPending), formatTime(time.Now()), telegramID)
-	if err != nil {
-		return nil, fmt.Errorf("store: set pending telegram_id=%d: %w", telegramID, err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, ErrNotFound
-	}
-	return s.GetUserByTelegramID(ctx, telegramID)
-}
-
-// GetSetting returns a setting's value and whether it was found.
+// GetSetting returns a setting value and whether it exists.
 func (s *Store) GetSetting(ctx context.Context, key string) (string, bool, error) {
 	var value string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
@@ -285,30 +323,27 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	return nil
 }
 
-// WriteAuditLog records one audit trail entry (plan.md §7 step 7). If
-// entry.Timestamp is zero it defaults to now. entry.Detail must never
-// contain a profile secret (see internal/logging's convention).
-func (s *Store) WriteAuditLog(ctx context.Context, entry models.AuditLog) error {
-	ts := entry.Timestamp
-	if ts.IsZero() {
-		ts = time.Now()
+// AppendAuditLog inserts an audit log row.
+func (s *Store) AppendAuditLog(ctx context.Context, entry models.AuditLog) error {
+	createdAt := entry.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO audit_log (ts, action, telegram_id, actor, detail)
+		INSERT INTO audit_log (created_at, action, actor, user_id, detail)
 		VALUES (?, ?, ?, ?, ?)`,
-		formatTime(ts), entry.Action, entry.TelegramID, entry.Actor, entry.Detail)
+		formatTime(createdAt), entry.Action, entry.Actor, entry.UserID, entry.Detail)
 	if err != nil {
-		return fmt.Errorf("store: write audit log: %w", err)
+		return fmt.Errorf("store: append audit log: %w", err)
 	}
 	return nil
 }
 
-// ListAuditLog returns the most recent audit rows, newest first, up to
-// limit.
+// ListAuditLog returns the newest audit rows up to limit.
 func (s *Store) ListAuditLog(ctx context.Context, limit int) ([]models.AuditLog, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, ts, action, telegram_id, actor, detail
-		FROM audit_log ORDER BY ts DESC, id DESC LIMIT ?`, limit)
+		SELECT id, created_at, action, actor, user_id, detail
+		FROM audit_log ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("store: list audit log: %w", err)
 	}
@@ -317,15 +352,20 @@ func (s *Store) ListAuditLog(ctx context.Context, limit int) ([]models.AuditLog,
 	var out []models.AuditLog
 	for rows.Next() {
 		var (
-			e  models.AuditLog
-			ts string
+			e          models.AuditLog
+			createdAt  string
+			userID     sql.NullInt64
 		)
-		if err := rows.Scan(&e.ID, &ts, &e.Action, &e.TelegramID, &e.Actor, &e.Detail); err != nil {
+		if err := rows.Scan(&e.ID, &createdAt, &e.Action, &e.Actor, &userID, &e.Detail); err != nil {
 			return nil, fmt.Errorf("store: list audit log: %w", err)
 		}
-		e.Timestamp, err = time.Parse(time.RFC3339Nano, ts)
+		e.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
 		if err != nil {
-			return nil, fmt.Errorf("store: list audit log: parse ts: %w", err)
+			return nil, fmt.Errorf("store: list audit log: parse created_at: %w", err)
+		}
+		if userID.Valid {
+			id := userID.Int64
+			e.UserID = &id
 		}
 		out = append(out, e)
 	}

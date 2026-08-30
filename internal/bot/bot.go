@@ -10,16 +10,12 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/applier"
-	"github.com/barakov-dot/tgproxy-panel/internal/config"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
-	"github.com/barakov-dot/tgproxy-panel/internal/qrcode"
-	"github.com/barakov-dot/tgproxy-panel/internal/service"
-	"github.com/barakov-dot/tgproxy-panel/internal/store"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/qrcode"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/service"
 )
 
-// qrSize is the pixel width/height of QR codes sent in chat — large enough
-// to scan comfortably on a phone screen without the photo feeling oversized.
 const qrSize = 320
 
 const (
@@ -28,68 +24,75 @@ const (
 	callbackDenyPrefix    = "deny:"
 )
 
-// Sender is the subset of *tgbotapi.BotAPI the bot package calls: Send for
-// messages/photos, Request for calls that don't return a Message (callback
-// acknowledgements, reply-markup-only edits). *tgbotapi.BotAPI satisfies
-// this directly, so tests can inject a fake that records calls instead of
-// hitting the real Telegram API.
+// Sender is the subset of *tgbotapi.BotAPI the bot calls. Tests inject a fake.
 type Sender interface {
 	Send(c tgbotapi.Chattable) (tgbotapi.Message, error)
 	Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
 }
 
-// Bot wires Telegram-specific plumbing (updates, keyboards, HTML messages)
-// around internal/service.Actions, the framework-agnostic orchestration
-// layer shared with internal/httpserver.
+// UpdatesSource yields Telegram updates (real API or test fake).
+type UpdatesSource interface {
+	GetUpdatesChan(cfg tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel
+	StopReceivingUpdates()
+}
+
+// Bot wires Telegram updates around internal/service.
 type Bot struct {
 	sender          Sender
-	actions         *service.Actions
+	updates         UpdatesSource
+	svc             *service.Service
 	adminTelegramID int64
-	proxyHost       string
 }
 
-func newBot(sender Sender, actions *service.Actions, adminTelegramID int64, proxyHost string) *Bot {
-	return &Bot{
-		sender:          sender,
-		actions:         actions,
-		adminTelegramID: adminTelegramID,
-		proxyHost:       proxyHost,
-	}
-}
-
-// Run starts long polling and blocks, dispatching updates until ctx is
-// cancelled — designed so a future cmd/tgproxy-panel/main.go can
-// `go bot.Run(ctx, ...)` alongside the HTTP server and shut both down
-// together on the same signal.
-func Run(ctx context.Context, cfg *config.Config, st *store.Store, ap *applier.Applier) error {
+// New builds a Bot from config and the shared service layer.
+func New(cfg *config.Config, svc *service.Service) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.BotToken)
 	if err != nil {
-		return fmt.Errorf("bot: init: %w", err)
+		return nil, fmt.Errorf("bot: init: %w", err)
 	}
+	return newBot(api, api, svc, cfg.AdminTelegramID), nil
+}
 
-	actions := service.New(st, ap, cfg.AutoIssue)
-	b := newBot(api, actions, cfg.AdminTelegramID, cfg.TproxyHostname)
+func newBot(sender Sender, updates UpdatesSource, svc *service.Service, adminTelegramID int64) *Bot {
+	return &Bot{
+		sender:          sender,
+		updates:         updates,
+		svc:             svc,
+		adminTelegramID: adminTelegramID,
+	}
+}
 
+// Run starts long polling and blocks until ctx is cancelled.
+func (b *Bot) Run(ctx context.Context) error {
 	uCfg := tgbotapi.NewUpdate(0)
 	uCfg.Timeout = 60
-	updates := api.GetUpdatesChan(uCfg)
+	updates := b.updates.GetUpdatesChan(uCfg)
 
 	for {
 		select {
 		case <-ctx.Done():
-			api.StopReceivingUpdates()
+			b.updates.StopReceivingUpdates()
 			return nil
 		case update, ok := <-updates:
 			if !ok {
 				return nil
 			}
-			// Each update runs in its own goroutine: issuing a profile
-			// involves a systemctl restart plus polling /readyz (tens of
-			// seconds, see internal/applier), which must not stall the poll
-			// loop from picking up other users' updates in the meantime.
 			go b.handleUpdate(ctx, update)
 		}
 	}
+}
+
+// SendProxyLink implements service.BotSender: sends the proxy link and QR photo.
+func (b *Bot) SendProxyLink(_ context.Context, telegramID int64, link string) error {
+	b.send(htmlMessage(telegramID, existingProxyText(link)))
+	png, err := qrcode.GeneratePNG(link, qrSize)
+	if err != nil {
+		return fmt.Errorf("bot: generate qr: %w", err)
+	}
+	if _, err := b.sender.Send(tgbotapi.NewPhoto(telegramID, tgbotapi.FileBytes{Name: "proxy.png", Bytes: png})); err != nil {
+		return fmt.Errorf("bot: send photo: %w", err)
+	}
+	return nil
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
@@ -139,7 +142,7 @@ func (b *Bot) handleGetProxy(ctx context.Context, cq *tgbotapi.CallbackQuery) {
 	from := cq.From
 	chatID := cq.Message.Chat.ID
 
-	res, err := b.actions.RequestProxy(ctx, from.ID, ptrIfNotEmpty(from.UserName),
+	res, err := b.svc.Request(ctx, from.ID, ptrIfNotEmpty(from.UserName),
 		ptrIfNotEmpty(from.FirstName), ptrIfNotEmpty(from.LastName))
 	if err != nil {
 		b.reportError(chatID, err)
@@ -170,15 +173,16 @@ func (b *Bot) handleAdminDecision(ctx context.Context, cq *tgbotapi.CallbackQuer
 		return
 	}
 
-	telegramID, err := strconv.ParseInt(strings.TrimPrefix(cq.Data, prefix), 10, 64)
+	userID, err := strconv.ParseInt(strings.TrimPrefix(cq.Data, prefix), 10, 64)
 	if err != nil {
 		slog.Error("bot: bad callback data", "data", cq.Data, "error", err)
 		b.ackCallback(cq.ID)
 		return
 	}
 
+	actor := service.ActorAdmin(cq.From.ID)
 	if approve {
-		u, err := b.actions.Approve(ctx, telegramID, service.ActorAdmin(cq.From.ID))
+		u, err := b.svc.Approve(ctx, userID, actor)
 		if err != nil {
 			b.reportAdminActionError(cq, err)
 			return
@@ -187,7 +191,7 @@ func (b *Bot) handleAdminDecision(ctx context.Context, cq *tgbotapi.CallbackQuer
 		b.send(htmlMessage(cq.Message.Chat.ID, approvedAdminConfirmText(u.DisplayName())))
 		b.sendProxy(u.TelegramID, u, issuedProxyText)
 	} else {
-		u, err := b.actions.Deny(ctx, telegramID, service.ActorAdmin(cq.From.ID))
+		u, err := b.svc.Deny(ctx, userID, actor)
 		if err != nil {
 			b.reportAdminActionError(cq, err)
 			return
@@ -199,9 +203,6 @@ func (b *Bot) handleAdminDecision(ctx context.Context, cq *tgbotapi.CallbackQuer
 	b.ackCallback(cq.ID)
 }
 
-// sendProxy sends the profile link as HTML text (Telegram auto-links the
-// https://t.me/... URL) followed by the same link rendered as a scannable
-// QR photo.
 func (b *Bot) sendProxy(chatID int64, u *models.User, textFor func(link string) string) {
 	if u == nil || u.Secret == nil {
 		slog.Error("bot: sendProxy called without a secret", "telegram_id", chatIDOrZero(u))
@@ -209,10 +210,10 @@ func (b *Bot) sendProxy(chatID int64, u *models.User, textFor func(link string) 
 		return
 	}
 
-	link := proxyLink(b.proxyHost, *u.Secret)
+	link := b.svc.GetProxyLink(u)
 	b.send(htmlMessage(chatID, textFor(link)))
 
-	png, err := qrcode.PNG(link, qrSize)
+	png, err := qrcode.GeneratePNG(link, qrSize)
 	if err != nil {
 		slog.Error("bot: generate qr failed", "error", err)
 		return
@@ -230,7 +231,7 @@ func chatIDOrZero(u *models.User) int64 {
 func (b *Bot) notifyAdmin(u *models.User) {
 	msg := tgbotapi.NewMessage(b.adminTelegramID, adminNotifyText(u.DisplayName(), u.TelegramID))
 	msg.ParseMode = tgbotapi.ModeHTML
-	idStr := strconv.FormatInt(u.TelegramID, 10)
+	idStr := strconv.FormatInt(u.ID, 10)
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(btnApprove, callbackApprovePrefix+idStr),
@@ -240,14 +241,6 @@ func (b *Bot) notifyAdmin(u *models.User) {
 	b.send(msg)
 }
 
-// clearAdminKeyboard removes the ✅/❌ buttons from the admin's notification
-// message so it can't be acted on twice. It only strips the reply markup —
-// deliberately not rewriting cq.Message.Text, since Telegram returns that
-// field already stripped of the original HTML tags, and reconstructing an
-// HTML-parse-mode message from it without re-escaping user-controlled
-// content (a requester's display name) would be fragile. The confirmation
-// text is sent as a separate message instead (see approvedAdminConfirmText/
-// deniedAdminConfirmText callers).
 func (b *Bot) clearAdminKeyboard(cq *tgbotapi.CallbackQuery) {
 	empty := tgbotapi.NewInlineKeyboardMarkup()
 	edit := tgbotapi.NewEditMessageReplyMarkup(cq.Message.Chat.ID, cq.Message.MessageID, empty)

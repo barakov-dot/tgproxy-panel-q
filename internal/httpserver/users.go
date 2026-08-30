@@ -8,9 +8,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
-	"github.com/barakov-dot/tgproxy-panel/internal/service"
-	"github.com/barakov-dot/tgproxy-panel/internal/store"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/service"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/store"
 )
 
 type usersListPageData struct {
@@ -28,29 +28,30 @@ type usersTableData struct {
 }
 
 func (s *Server) userListData(r *http.Request) (usersTableData, error) {
-	users, err := s.store.ListUsers(r.Context())
-	if err != nil {
-		return usersTableData{}, err
-	}
-	pendingCount := len(FilterPending(users))
-
 	q := r.URL.Query().Get("q")
 	col := parseSortColumn(r.URL.Query().Get("sort"))
-	dirParam := r.URL.Query().Get("dir")
-	desc := parseSortDir(dirParam)
+	desc := parseSortDir(r.URL.Query().Get("dir"))
 	dir := "desc"
 	if !desc {
 		dir = "asc"
 	}
 	onlyPending := r.URL.Query().Get("filter") == "pending"
 
-	filtered := FilterAndSort(users, q, col, desc)
-	if onlyPending {
-		filtered = FilterPending(filtered)
+	users, err := s.svc.ListUsers(r.Context(), buildListFilter(onlyPending, q), buildListSort(col, desc))
+	if err != nil {
+		return usersTableData{}, err
+	}
+	if col == SortName {
+		sortUsers(users, SortName, desc)
+	}
+
+	pendingCount, err := s.svc.CountPendingUsers(r.Context())
+	if err != nil {
+		return usersTableData{}, err
 	}
 
 	return usersTableData{
-		Users:        filtered,
+		Users:        users,
 		Query:        q,
 		Sort:         col,
 		Dir:          dir,
@@ -72,9 +73,6 @@ func (s *Server) handleUserList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleUserTable serves the htmx partial (just the table body + header
-// links) used by both live search (hx-trigger="keyup changed delay:300ms")
-// and click-to-sort column headers, so neither triggers a full page reload.
 func (s *Server) handleUserTable(w http.ResponseWriter, r *http.Request) {
 	data, err := s.userListData(r)
 	if err != nil {
@@ -96,23 +94,13 @@ type userDetailPageData struct {
 	Message string
 }
 
-// profileLink builds the t.me deep link per plan.md §5:
-// https://t.me/webproxy?server=<host>&secret=<secret>
-func profileLink(hostname, secret string) string {
-	if secret == "" {
-		return ""
-	}
-	v := "https://t.me/webproxy?server=" + hostname + "&secret=" + secret
-	return v
-}
-
 func (s *Server) userByIDParam(r *http.Request) (*models.User, error) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
 		return nil, store.ErrNotFound
 	}
-	return s.store.GetUserByID(r.Context(), id)
+	return s.svc.GetUser(r.Context(), id)
 }
 
 func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
@@ -125,23 +113,15 @@ func (s *Server) handleUserDetail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) userDetailData(u *models.User, message, errMsg string) userDetailPageData {
-	link := ""
-	if u.Secret != nil {
-		link = profileLink(s.cfg.TproxyHostname, *u.Secret)
-	}
 	return userDetailPageData{
 		pageData: s.newPageData("users"),
 		User:     u,
-		Link:     link,
+		Link:     s.svc.GetProxyLink(u),
 		Message:  message,
 		Error:    errMsg,
 	}
 }
 
-// renderUserDetail renders just the swappable detail section (used by the
-// approve/deny/revoke handlers, whose htmx requests target
-// #user-detail-content and expect only that fragment back — swapping a
-// full <html> document into it would nest a document inside a div).
 func (s *Server) renderUserDetail(w http.ResponseWriter, r *http.Request, u *models.User, message, errMsg string) {
 	s.render(w, r, "user_detail_content.html", s.userDetailData(u, message, errMsg))
 }
@@ -155,79 +135,77 @@ func (s *Server) notFoundOrError(w http.ResponseWriter, r *http.Request, err err
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 
-// actorName identifies who performed a state-changing action, for the audit
-// log. There is exactly one admin account (plan.md §5), so the configured
-// login is a stable, sufficient actor identity.
 func (s *Server) actorName() string {
 	return "panel:" + s.cfg.AdminLogin
 }
 
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
-	s.runAction(w, r, func(ctx context.Context, telegramID int64) (*models.User, error) {
-		return s.actions.Approve(ctx, telegramID, s.actorName())
+	s.runUserAction(w, r, func(ctx context.Context, userID int64) (*models.User, error) {
+		return s.svc.Approve(ctx, userID, s.actorName())
 	})
 }
 
 func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
-	s.runAction(w, r, func(ctx context.Context, telegramID int64) (*models.User, error) {
-		return s.actions.Revoke(ctx, telegramID, s.actorName())
+	s.runUserAction(w, r, func(ctx context.Context, userID int64) (*models.User, error) {
+		return s.svc.Revoke(ctx, userID, s.actorName())
 	})
 }
 
 func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
-	s.runAction(w, r, func(ctx context.Context, telegramID int64) (*models.User, error) {
-		return s.actions.Deny(ctx, telegramID, s.actorName())
+	s.runUserAction(w, r, func(ctx context.Context, userID int64) (*models.User, error) {
+		return s.svc.Deny(ctx, userID, s.actorName())
 	})
 }
 
-// handleNotify is a placeholder for plan.md §5's "отправить пользователю в
-// Telegram" button. Actually sending the message needs a live bot client
-// (internal/bot), which cmd/tgproxy-panel/main.go wires up alongside this
-// server — until main.go passes a sender through, this just tells the admin
-// so, rather than silently doing nothing or 404ing.
-func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	u, err := s.userByIDParam(r)
 	if err != nil {
 		s.notFoundOrError(w, r, err)
 		return
 	}
-	s.renderUserDetail(w, r, u, "", "Отправка через бота пока не подключена. Скопируйте ссылку вручную.")
+	if err := s.svc.Resend(r.Context(), u.ID, s.actorName()); err != nil {
+		msg := userFacingSendError(err)
+		current, lookupErr := s.svc.GetUser(r.Context(), u.ID)
+		if lookupErr != nil {
+			s.log.Error("re-lookup user after failed send", "error", lookupErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		s.log.Error("send proxy link failed", "error", err, "user_id", u.ID)
+		s.renderUserDetail(w, r, current, "", msg)
+		return
+	}
+	current, err := s.svc.GetUser(r.Context(), u.ID)
+	if err != nil {
+		s.notFoundOrError(w, r, err)
+		return
+	}
+	s.renderUserDetail(w, r, current, "Ссылка отправлена пользователю в Telegram.", "")
 }
 
-// runAction loads the user targeted by the {id} path param, runs action
-// against its telegram_id, and re-renders the user_detail partial with
-// either the fresh state or a Russian, user-facing error — this is what
-// makes the buttons on the detail page htmx-friendly (hx-post + hx-target
-// swapping the detail section) rather than a full-page redirect.
-func (s *Server) runAction(w http.ResponseWriter, r *http.Request, action func(context.Context, int64) (*models.User, error)) {
+func (s *Server) runUserAction(w http.ResponseWriter, r *http.Request, action func(context.Context, int64) (*models.User, error)) {
 	u, err := s.userByIDParam(r)
 	if err != nil {
 		s.notFoundOrError(w, r, err)
 		return
 	}
 
-	updated, err := action(r.Context(), u.TelegramID)
+	updated, err := action(r.Context(), u.ID)
 	if err != nil {
 		msg := userFacingActionError(err)
-		// updated is nil on hard failure; re-fetch current state so the
-		// page still reflects reality instead of going blank.
-		current, lookupErr := s.store.GetUserByTelegramID(r.Context(), u.TelegramID)
+		current, lookupErr := s.svc.GetUser(r.Context(), u.ID)
 		if lookupErr != nil {
 			s.log.Error("re-lookup user after failed action", "error", lookupErr)
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
-		s.log.Error("user action failed", "action_error", err, "telegram_id", u.TelegramID)
+		s.log.Error("user action failed", "action_error", err, "user_id", u.ID)
 		s.renderUserDetail(w, r, current, "", msg)
 		return
 	}
 	s.renderUserDetail(w, r, updated, "Готово.", "")
 }
 
-// userFacingActionError translates internal/service's sentinel errors into
-// the Russian copy shown on the detail page. Everything else (a real DB or
-// applier error) gets one generic message — the exact cause is logged
-// server-side, not shown to the browser.
 func userFacingActionError(err error) string {
 	switch {
 	case errors.Is(err, service.ErrAlreadyActive):
@@ -242,5 +220,18 @@ func userFacingActionError(err error) string {
 		return "Статус изменён на «отозван», но применить изменения на сервере не удалось. Повторите попытку."
 	default:
 		return "Внутренняя ошибка. Попробуйте ещё раз."
+	}
+}
+
+func userFacingSendError(err error) string {
+	switch {
+	case errors.Is(err, service.ErrNotActive):
+		return "У пользователя нет активного профиля."
+	case errors.Is(err, service.ErrNoProxyLink):
+		return "Не удалось построить ссылку на прокси."
+	case errors.Is(err, service.ErrNoBotSender):
+		return "Отправка через бота пока не подключена. Скопируйте ссылку вручную."
+	default:
+		return "Не удалось отправить сообщение. Попробуйте ещё раз."
 	}
 }

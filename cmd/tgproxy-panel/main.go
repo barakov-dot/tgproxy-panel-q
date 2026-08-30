@@ -20,24 +20,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/applier"
-	"github.com/barakov-dot/tgproxy-panel/internal/auth"
-	"github.com/barakov-dot/tgproxy-panel/internal/bot"
-	"github.com/barakov-dot/tgproxy-panel/internal/config"
-	"github.com/barakov-dot/tgproxy-panel/internal/httpserver"
-	"github.com/barakov-dot/tgproxy-panel/internal/logging"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
-	"github.com/barakov-dot/tgproxy-panel/internal/store"
-	"golang.org/x/crypto/bcrypt"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/applier"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/auth"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/bot"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/httpserver"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/logging"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/service"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/store"
 	"golang.org/x/term"
 )
 
-// shutdownTimeout bounds how long we wait for in-flight HTTP requests to
-// finish on SIGINT/SIGTERM before forcing the listener closed. It does not
-// bound the bot: a request in flight there (issue/revoke) may be mid
-// systemctl-restart-and-poll-/readyz, which legitimately takes tens of
-// seconds (see internal/applier) — the bot goroutine is given the same
-// grace via ctx cancellation and is simply awaited, not force-timed-out.
 const shutdownTimeout = 10 * time.Second
 
 func main() {
@@ -58,36 +52,19 @@ func main() {
 	}
 }
 
-// runHashPassword implements `tgproxy-panel -hash-password` (see
-// .env.example's ADMIN_PASSWORD_HASH comment). deploy/install.sh has no
-// other way to produce a bcrypt hash on a target host without adding an
-// external dependency (htpasswd, python3-bcrypt, ...) that may not be
-// present on a minimal Debian/Ubuntu install, so the already-built panel
-// binary does it itself: install.sh pipes the admin's password (already
-// confirmed twice on its own end) to this flag over stdin and captures
-// exactly one line of output — the bcrypt hash, and nothing else — via
-// command substitution. Prompts, when interactive, go to stderr so they
-// never end up mixed into that captured output.
 func runHashPassword(in *os.File, out io.Writer, errOut io.Writer) error {
 	password, err := readPassword(in, errOut)
 	if err != nil {
 		return err
 	}
-	if password == "" {
-		return errors.New("password must not be empty")
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := config.HashPassword(password)
 	if err != nil {
-		return fmt.Errorf("generate bcrypt hash: %w", err)
+		return err
 	}
-	fmt.Fprintln(out, string(hash))
+	fmt.Fprintln(out, hash)
 	return nil
 }
 
-// readPassword reads a single password from in. When in is a terminal
-// (interactive manual use), it prompts on errOut and reads with echo
-// disabled via golang.org/x/term; otherwise (install.sh's case: in is a
-// pipe) it reads the first line verbatim.
 func readPassword(in *os.File, errOut io.Writer) (string, error) {
 	if term.IsTerminal(int(in.Fd())) {
 		fmt.Fprint(errOut, "Password: ")
@@ -101,9 +78,6 @@ func readPassword(in *os.File, errOut io.Writer) (string, error) {
 	return readLine(in)
 }
 
-// readLine reads one newline-terminated (or EOF-terminated) line from r,
-// trimming the trailing line ending. Split out from readPassword so it can
-// be unit tested without a real terminal or *os.File.
 func readLine(r io.Reader) (string, error) {
 	scanner := bufio.NewScanner(r)
 	if !scanner.Scan() {
@@ -122,7 +96,7 @@ func run() error {
 	}
 
 	log := logging.New(cfg.LogFormat)
-	slog.SetDefault(log)
+	logging.SetDefault(log)
 
 	st, err := store.Open(cfg.DBPath)
 	if err != nil {
@@ -134,12 +108,21 @@ func run() error {
 		return fmt.Errorf("seed auto_issue setting: %w", err)
 	}
 
-	ap := applier.New(cfg, st)
+	ap := applier.New(cfg, applier.Store{Store: st})
+
+	var botRef botSenderRef
+	svc := service.New(cfg, st, ap, &botRef)
+
+	panelBot, err := bot.New(cfg, svc)
+	if err != nil {
+		return fmt.Errorf("init bot: %w", err)
+	}
+	botRef.b = panelBot
 
 	sessions := auth.NewSessions(cfg.SessionSecret)
 	limiter := auth.NewDefaultLoginLimiter()
 
-	srv, err := httpserver.New(cfg, st, ap, sessions, limiter, log)
+	srv, err := httpserver.New(cfg, svc, sessions, limiter, log)
 	if err != nil {
 		return fmt.Errorf("build http server: %w", err)
 	}
@@ -159,7 +142,7 @@ func run() error {
 	go func() {
 		defer wg.Done()
 		log.Info("bot: starting long polling")
-		if err := bot.Run(ctx, cfg, st, ap); err != nil {
+		if err := panelBot.Run(ctx); err != nil {
 			botErr = err
 			log.Error("bot: stopped with error", "error", err)
 		}
@@ -187,11 +170,6 @@ func run() error {
 	return botErr
 }
 
-// seedAutoIssueSetting writes the settings table's auto_issue row from
-// Config.AutoIssue the first time the panel ever starts (plan.md §9:
-// AUTO_ISSUE in .env is only the initial default — after that, the panel's
-// settings page is authoritative and this must not overwrite an admin's
-// later choice on every restart).
 func seedAutoIssueSetting(ctx context.Context, st *store.Store, defaultAutoIssue bool) error {
 	_, ok, err := st.GetSetting(ctx, models.SettingAutoIssue)
 	if err != nil {
@@ -201,4 +179,17 @@ func seedAutoIssueSetting(ctx context.Context, st *store.Store, defaultAutoIssue
 		return nil
 	}
 	return st.SetSetting(ctx, models.SettingAutoIssue, strconv.FormatBool(defaultAutoIssue))
+}
+
+// botSenderRef breaks the bot/service init cycle: service needs a BotSender
+// at construction time, but bot.New needs the service.
+type botSenderRef struct {
+	b *bot.Bot
+}
+
+func (r *botSenderRef) SendProxyLink(ctx context.Context, telegramID int64, link string) error {
+	if r.b == nil {
+		return service.ErrNoBotSender
+	}
+	return r.b.SendProxyLink(ctx, telegramID, link)
 }

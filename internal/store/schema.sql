@@ -1,3 +1,5 @@
+-- SQLite schema for tgproxy-panel. Applied on first run via store.Migrate().
+
 CREATE TABLE IF NOT EXISTS users (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
   telegram_id   INTEGER UNIQUE NOT NULL,
@@ -18,10 +20,15 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts          DATETIME NOT NULL,
-  action      TEXT NOT NULL,
-  telegram_id INTEGER,
-  actor       TEXT NOT NULL,
-  detail      TEXT
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+  action     TEXT NOT NULL,
+  actor      TEXT NOT NULL,
+  user_id    INTEGER,
+  detail     TEXT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_users_status ON users(status);
+CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at ON audit_log(created_at);

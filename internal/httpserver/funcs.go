@@ -5,13 +5,9 @@ import (
 	"html/template"
 	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
 )
 
-// templateFuncs are helpers exposed to every template — Russian status
-// labels/badges, timestamp formatting, and a "dict" helper since
-// html/template has no built-in support for any of them, or for passing
-// more than one value into a sub-template invocation.
 var templateFuncs = template.FuncMap{
 	"statusLabel":      statusLabel,
 	"statusBadgeClass": statusBadgeClass,
@@ -21,9 +17,6 @@ var templateFuncs = template.FuncMap{
 	"dict":             dict,
 }
 
-// dict builds a map[string]any from alternating key/value arguments, the
-// standard html/template trick for passing multiple named values into a
-// {{template}} invocation (which otherwise only accepts a single ".").
 func dict(kv ...any) (map[string]any, error) {
 	if len(kv)%2 != 0 {
 		return nil, fmt.Errorf("dict: odd number of arguments")

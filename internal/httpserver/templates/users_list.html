@@ -22,7 +22,7 @@
 
   <div class="mb-4">
     <input type="text" name="q" value="{{.Query}}" placeholder="Поиск по ID, имени, username, статусу…"
-           hx-get="{{.Base}}/users/table?sort={{.Sort}}&dir={{.Dir}}{{if .OnlyPending}}&filter=pending{{end}}"
+           hx-get="{{.Base}}/users?sort={{.Sort}}&dir={{.Dir}}{{if .OnlyPending}}&filter=pending{{end}}"
            hx-trigger="keyup changed delay:300ms, search"
            hx-target="#users-table-wrap" hx-swap="innerHTML" hx-push-url="true"
            class="w-full max-w-md rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100">

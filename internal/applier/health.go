@@ -4,24 +4,46 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
 )
 
-// Reference install.sh polls /readyz 20 times with a 1s sleep between
-// attempts after restarting tproxy-server; we match that shape here so
-// behavior stays consistent with what the upstream installer already
-// proved works, rather than inventing new timing.
 const (
 	defaultHealthCheckAttempts = 20
 	defaultHealthCheckInterval = time.Second
 )
 
-// waitForReady polls baseURL+"/readyz" until it returns 200, up to
-// attempts times with interval between tries. It returns ErrNotReady
-// (wrapping the last failure) if the service never became ready.
-func waitForReady(ctx context.Context, client *http.Client, baseURL string, attempts int, interval time.Duration) error {
-	url := baseURL + "/readyz"
+func checkServiceActive(ctx context.Context, runner Runner, serviceName string) error {
+	stdout, stderr, err := runner.Run(ctx, "systemctl", "is-active", serviceName)
+	if err != nil {
+		return fmt.Errorf("systemctl is-active: %w (stderr: %s)", err, strings.TrimSpace(stderr))
+	}
+	if strings.TrimSpace(stdout) != "active" {
+		return fmt.Errorf("systemctl is-active %q returned %q", serviceName, strings.TrimSpace(stdout))
+	}
+	return nil
+}
 
+func checkReadyz(ctx context.Context, client *http.Client, baseURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/readyz", nil)
+	if err != nil {
+		return fmt.Errorf("build readyz request: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("readyz returned status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// waitForHealthy polls systemctl is-active and /readyz until both succeed.
+func waitForHealthy(ctx context.Context, runner Runner, client *http.Client, cfg *config.Config, attempts int, interval time.Duration) error {
 	var lastErr error
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
@@ -31,21 +53,15 @@ func waitForReady(ctx context.Context, client *http.Client, baseURL string, atte
 			case <-time.After(interval):
 			}
 		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return fmt.Errorf("applier: build readyz request: %w", err)
-		}
-		resp, err := client.Do(req)
-		if err != nil {
+		if err := checkServiceActive(ctx, runner, cfg.TproxyServiceName); err != nil {
 			lastErr = err
 			continue
 		}
-		resp.Body.Close()
-		if resp.StatusCode == http.StatusOK {
-			return nil
+		if err := checkReadyz(ctx, client, cfg.TproxyAdminURL); err != nil {
+			lastErr = err
+			continue
 		}
-		lastErr = fmt.Errorf("readyz returned status %d", resp.StatusCode)
+		return nil
 	}
 	return fmt.Errorf("%w after %d attempts: %v", ErrNotReady, attempts, lastErr)
 }

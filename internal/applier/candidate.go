@@ -11,37 +11,24 @@ import (
 	"time"
 )
 
-// candidateSubdir is where applier stages the profiles.json it wants
-// deploy/apply-profiles.sh to install, under Config.BackupDir — a
-// directory the unprivileged panel process already owns and writes to,
-// unlike /etc/tproxy-server itself.
 const candidateSubdir = "candidates"
 
-// candidateTimeFormat is filesystem-safe (no colons) UTC RFC3339-ish,
-// matching plan.md §10's example backup filenames
-// (profiles.json.2026-08-30T12-00-00Z.bak), with nanoseconds appended so
-// two applies within the same second (a burst of issues/revokes) still get
-// distinct candidate filenames instead of silently overwriting each other.
 const candidateTimeFormat = "2006-01-02T15-04-05.000000000Z"
 
-const candidatePrefix = "profiles.json.candidate."
-const candidateSuffix = ".json"
+const (
+	candidatePrefix = "profiles.json.candidate."
+	candidateSuffix = ".json"
+)
 
-// candidateSeq guarantees unique candidate filenames even if two writes
-// land in the same nanosecond-timestamp bucket (observed under -race in
-// tight test loops); it plays no role in production correctness beyond
-// that.
 var candidateSeq atomic.Uint64
 
-// writeCandidate marshals pf as indented JSON and writes it atomically
-// (temp file + rename, same directory as the final candidate path so the
-// rename is same-filesystem) into backupDir/candidates/, then prunes
-// older candidates beyond keep. It returns the path written.
-//
-// The rename is atomic so deploy/apply-profiles.sh — which may be invoked
-// concurrently with the next write starting — never observes a
-// partially-written candidate file.
+// writeCandidate marshals pf and writes it atomically under backupDir/candidates/,
+// then prunes older candidates beyond keep.
 func writeCandidate(backupDir string, pf *ProfilesFile, keep int) (string, error) {
+	if err := pf.Validate(); err != nil {
+		return "", err
+	}
+
 	dir := filepath.Join(backupDir, candidateSubdir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("applier: create candidate dir: %w", err)
@@ -51,6 +38,7 @@ func writeCandidate(backupDir string, pf *ProfilesFile, keep int) (string, error
 	if err != nil {
 		return "", fmt.Errorf("applier: marshal candidate: %w", err)
 	}
+	data = append(data, '\n')
 
 	seq := candidateSeq.Add(1)
 	name := fmt.Sprintf("%s%s.%06d%s", candidatePrefix, time.Now().UTC().Format(candidateTimeFormat), seq, candidateSuffix)
@@ -85,10 +73,6 @@ func writeCandidate(backupDir string, pf *ProfilesFile, keep int) (string, error
 	return final, nil
 }
 
-// pruneOldCandidates keeps only the newest keep candidate files in dir,
-// deleting the rest. Filenames are timestamp-prefixed (candidateTimeFormat
-// sorts lexically = chronologically), so a plain name sort orders oldest
-// first without needing to stat mtimes.
 func pruneOldCandidates(dir string, keep int) error {
 	if keep <= 0 {
 		return nil
@@ -97,7 +81,6 @@ func pruneOldCandidates(dir string, keep int) error {
 	if err != nil {
 		return fmt.Errorf("read candidate dir: %w", err)
 	}
-
 	var names []string
 	for _, e := range entries {
 		if e.IsDir() {
@@ -109,7 +92,6 @@ func pruneOldCandidates(dir string, keep int) error {
 		}
 	}
 	sort.Strings(names)
-
 	if len(names) <= keep {
 		return nil
 	}

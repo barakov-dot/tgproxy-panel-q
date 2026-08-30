@@ -1,7 +1,6 @@
-// Package config loads tgproxy-panel's configuration from environment
-// variables (see .env.example and plan.md §9). The process environment is
-// assumed to already be populated (systemd EnvironmentFile= or a wrapper
-// script) — this package intentionally does not parse .env files itself.
+// Package config loads tgproxy-panel configuration from a .env file and the
+// process environment (see .env.example and PLAN.md §9). Values already present
+// in the process environment override .env entries.
 package config
 
 import (
@@ -42,36 +41,51 @@ type Config struct {
 	BackupKeep int
 
 	ApplyProfilesScript string
-
-	// TproxyServerBin is the tproxy-server binary internal/applier shells
-	// out to for `-check` validation before staging a candidate
-	// profiles.json (see CLAUDE.md's verified facts on -check). Optional:
-	// defaults to where tproxy-server's own install.sh installs it, since
-	// most deployments never need to override this.
-	TproxyServerBin string
+	TproxyServerBin     string
 
 	LogFormat string
 }
 
-// defaultTproxyServerBin is where tproxy-server's own install.sh installs
-// the binary (verified against the reference install.sh); used when
-// TPROXY_SERVER_BIN is unset.
-const defaultTproxyServerBin = "/usr/local/bin/tproxy-server"
+const (
+	defaultEnvFile          = ".env"
+	defaultTproxyServerBin  = "/usr/local/bin/tproxy-server"
+	minPanelPathTokenLength = 8
+	minSessionSecretLength  = 16
+)
 
-// Load reads and validates configuration from the process environment. It
-// returns a descriptive error (rather than panicking) listing every problem
-// found, so a misconfigured deployment fails fast and clearly at startup.
+// Load reads .env (if present) then validates configuration from the process
+// environment. Use ENV_FILE to point at a non-default .env path.
 func Load() (*Config, error) {
+	envFile := getenv("ENV_FILE")
+	if envFile == "" {
+		envFile = defaultEnvFile
+	}
+	if err := loadDotEnv(envFile); err != nil {
+		return nil, err
+	}
+	return loadFromEnv()
+}
+
+// LoadFile loads configuration after applying variables from the given .env
+// file. Process environment still overrides file values.
+func LoadFile(path string) (*Config, error) {
+	if err := loadDotEnv(path); err != nil {
+		return nil, err
+	}
+	return loadFromEnv()
+}
+
+func loadFromEnv() (*Config, error) {
 	var errs []error
 
 	cfg := &Config{}
 
 	cfg.PanelPort = requirePort(&errs, "PANEL_PORT")
-	cfg.PanelPathToken = requireMinLen(&errs, "PANEL_PATH_TOKEN", 8)
+	cfg.PanelPathToken = requireMinLen(&errs, "PANEL_PATH_TOKEN", minPanelPathTokenLength)
 
 	cfg.AdminLogin = require(&errs, "ADMIN_LOGIN")
 	cfg.AdminPasswordHash = requireBcryptHash(&errs, "ADMIN_PASSWORD_HASH")
-	cfg.SessionSecret = requireMinLen(&errs, "SESSION_SECRET", 16)
+	cfg.SessionSecret = requireMinLen(&errs, "SESSION_SECRET", minSessionSecretLength)
 
 	cfg.BotToken = require(&errs, "BOT_TOKEN")
 	cfg.AdminTelegramID = requirePositiveInt64(&errs, "ADMIN_TELEGRAM_ID")
@@ -91,7 +105,6 @@ func Load() (*Config, error) {
 	cfg.BackupKeep = requirePositiveInt(&errs, "BACKUP_KEEP")
 
 	cfg.ApplyProfilesScript = requireAbsPath(&errs, "APPLY_PROFILES_SCRIPT")
-
 	cfg.TproxyServerBin = optionalAbsPath(&errs, "TPROXY_SERVER_BIN", defaultTproxyServerBin)
 
 	cfg.LogFormat = logFormat(&errs)
@@ -133,7 +146,7 @@ func requireAbsPath(errs *[]error, key string) string {
 func requireBcryptHash(errs *[]error, key string) string {
 	v := require(errs, key)
 	if v != "" && !strings.HasPrefix(v, "$2") {
-		*errs = append(*errs, fmt.Errorf("%s does not look like a bcrypt hash (expected a $2.. prefix, generate with tgproxy-panel -hash-password)", key))
+		*errs = append(*errs, fmt.Errorf("%s does not look like a bcrypt hash (expected a $2.. prefix; generate with tgproxy-panel -hash-password)", key))
 	}
 	return v
 }
@@ -213,8 +226,6 @@ func requireBool(errs *[]error, key string) bool {
 	return b
 }
 
-// optionalAbsPath reads an optional absolute-path variable, falling back to
-// def when unset (mirroring logFormat's default-handling below).
 func optionalAbsPath(errs *[]error, key, def string) string {
 	v := getenv(key)
 	if v == "" {
@@ -226,8 +237,6 @@ func optionalAbsPath(errs *[]error, key, def string) string {
 	return v
 }
 
-// logFormat is the only variable with a real default (matching the "json is
-// the default" comment in .env.example), so it does not go through require.
 func logFormat(errs *[]error) string {
 	v := getenv("LOG_FORMAT")
 	if v == "" {

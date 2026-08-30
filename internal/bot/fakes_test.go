@@ -3,25 +3,23 @@ package bot
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/applier"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
-	"github.com/barakov-dot/tgproxy-panel/internal/service"
-	"github.com/barakov-dot/tgproxy-panel/internal/store"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/applier"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/service"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/store"
 )
 
-// fakeStore is a minimal in-memory stand-in for *store.Store, scoped to
-// service.Store (what *service.Actions needs). Kept in this package rather
-// than shared from internal/service's own test fakes since those are
-// unexported test-only types.
 type fakeStore struct {
 	users    map[int64]*models.User
 	settings map[string]string
 	nextID   int64
 
 	createErr     error
-	issueErr      error
-	denyErr       error
+	setProfileErr error
+	updateErr     error
 	getSettingErr error
 
 	auditLogs []models.AuditLog
@@ -55,71 +53,74 @@ func (f *fakeStore) CreateUser(_ context.Context, telegramID int64, username, fi
 		return nil, f.createErr
 	}
 	f.nextID++
+	now := time.Now()
 	u := &models.User{
 		ID: f.nextID, TelegramID: telegramID,
 		Username: username, FirstName: firstName, LastName: lastName,
-		Status: models.StatusPending,
+		Status: models.StatusPending, RequestedAt: &now,
 	}
 	f.users[telegramID] = u
 	cp := *u
 	return &cp, nil
 }
 
-func (f *fakeStore) ListUsers(_ context.Context) ([]*models.User, error) {
-	out := make([]*models.User, 0, len(f.users))
-	for _, u := range f.users {
-		cp := *u
-		out = append(out, &cp)
+func (f *fakeStore) SetUserProfile(_ context.Context, id int64, profileName, secret string, setActive bool) (*models.User, error) {
+	if f.setProfileErr != nil {
+		return nil, f.setProfileErr
 	}
-	return out, nil
-}
-
-func (f *fakeStore) IssueUser(_ context.Context, telegramID int64, profileName, secret string) (*models.User, error) {
-	if f.issueErr != nil {
-		return nil, f.issueErr
+	var u *models.User
+	for _, candidate := range f.users {
+		if candidate.ID == id {
+			u = candidate
+			break
+		}
 	}
-	u, ok := f.users[telegramID]
-	if !ok {
+	if u == nil {
 		return nil, store.ErrNotFound
 	}
-	u.Status = models.StatusActive
 	u.ProfileName = &profileName
 	u.Secret = &secret
+	if setActive {
+		now := time.Now()
+		u.Status = models.StatusActive
+		u.IssuedAt = &now
+	}
 	cp := *u
 	return &cp, nil
 }
 
-func (f *fakeStore) RevokeUser(_ context.Context, telegramID int64) (*models.User, error) {
-	u, ok := f.users[telegramID]
-	if !ok {
+func (f *fakeStore) UpdateUserStatus(_ context.Context, id int64, status models.UserStatus) (*models.User, error) {
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	var u *models.User
+	for _, candidate := range f.users {
+		if candidate.ID == id {
+			u = candidate
+			break
+		}
+	}
+	if u == nil {
 		return nil, store.ErrNotFound
 	}
-	u.Status = models.StatusRevoked
+	u.Status = status
+	cp := *u
+	return &cp, nil
+}
+
+func (f *fakeStore) ClearUserProfile(_ context.Context, id int64) (*models.User, error) {
+	var u *models.User
+	for _, candidate := range f.users {
+		if candidate.ID == id {
+			u = candidate
+			break
+		}
+	}
+	if u == nil {
+		return nil, store.ErrNotFound
+	}
 	u.ProfileName = nil
 	u.Secret = nil
-	cp := *u
-	return &cp, nil
-}
-
-func (f *fakeStore) DenyUser(_ context.Context, telegramID int64) (*models.User, error) {
-	if f.denyErr != nil {
-		return nil, f.denyErr
-	}
-	u, ok := f.users[telegramID]
-	if !ok {
-		return nil, store.ErrNotFound
-	}
-	u.Status = models.StatusDenied
-	cp := *u
-	return &cp, nil
-}
-
-func (f *fakeStore) SetPending(_ context.Context, telegramID int64) (*models.User, error) {
-	u, ok := f.users[telegramID]
-	if !ok {
-		return nil, store.ErrNotFound
-	}
-	u.Status = models.StatusPending
 	cp := *u
 	return &cp, nil
 }
@@ -137,13 +138,20 @@ func (f *fakeStore) SetSetting(_ context.Context, key, value string) error {
 	return nil
 }
 
-func (f *fakeStore) WriteAuditLog(_ context.Context, entry models.AuditLog) error {
+func (f *fakeStore) AppendAuditLog(_ context.Context, entry models.AuditLog) error {
 	f.auditLogs = append(f.auditLogs, entry)
 	return nil
 }
 
-// fakeApplier is a minimal stand-in for *applier.Applier, scoped to
-// service.Applier.
+func (f *fakeStore) ListUsers(_ context.Context, _ store.UserListFilter, _ store.UserListSort) ([]*models.User, error) {
+	out := make([]*models.User, 0, len(f.users))
+	for _, u := range f.users {
+		cp := *u
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
 type fakeApplier struct {
 	err   error
 	calls []applierCall
@@ -171,12 +179,13 @@ func (f *fakeApplier) RevokeProfile(_ context.Context, telegramID int64) (*appli
 	return &applier.Result{ProfileCount: 0}, nil
 }
 
-func testActions(st *fakeStore, ap *fakeApplier, defaultAutoIssue bool) *service.Actions {
-	return &service.Actions{
-		Store:            st,
-		Applier:          ap,
-		DefaultAutoIssue: defaultAutoIssue,
-		GenSecret:        func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil },
-		ProfileName:      func(id int64) string { return fmt.Sprintf("user_%d", id) },
+func testService(st *fakeStore, ap *fakeApplier, defaultAutoIssue bool) *service.Service {
+	cfg := &config.Config{
+		TproxyHostname: "proxy.example.com",
+		AutoIssue:      defaultAutoIssue,
 	}
+	svc := service.New(cfg, st, ap, nil)
+	svc.GenSecret = func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil }
+	svc.ProfileName = func(id int64) string { return fmt.Sprintf("user_%d", id) }
+	return svc
 }

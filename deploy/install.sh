@@ -3,8 +3,8 @@
 # install.sh — interactive installer for tgproxy-panel (plan.md §8).
 #
 # Run as root, from inside a clone of this repository:
-#   git clone https://github.com/barakov-dot/tgproxy-panel.git
-#   cd tgproxy-panel
+#   git clone https://github.com/barakov-dot/tgproxy-panel-q.git
+#   cd tgproxy-panel-q
 #   sudo ./deploy/install.sh
 #
 # Precondition: tproxy-server is already installed and working on this host
@@ -498,7 +498,7 @@ chmod 0700 "$install_dir/backup"
 # --- 12. Acquire the tgproxy-panel binary (plan.md §12) ---
 
 binary_path="$install_dir/tgproxy-panel"
-release_url="https://github.com/barakov-dot/tgproxy-panel/releases/latest/download/tgproxy-panel-linux-amd64"
+release_url="https://github.com/barakov-dot/tgproxy-panel-q/releases/latest/download/tgproxy-panel-linux-amd64"
 binary_tmp="$(new_tmp)"
 
 info "attempting to download release binary from $release_url"

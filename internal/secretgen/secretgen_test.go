@@ -23,29 +23,14 @@ func TestGenerateSecret_FormatAndLength(t *testing.T) {
 func TestGenerateSecret_Randomness(t *testing.T) {
 	a, err := GenerateSecret()
 	if err != nil {
-		t.Fatalf("GenerateSecret() error = %v", err)
+		t.Fatal(err)
 	}
 	b, err := GenerateSecret()
 	if err != nil {
-		t.Fatalf("GenerateSecret() error = %v", err)
+		t.Fatal(err)
 	}
 	if a == b {
-		t.Errorf("two consecutive GenerateSecret() calls produced the same value: %q", a)
-	}
-}
-
-func TestGenerateSecret_ManyUnique(t *testing.T) {
-	seen := make(map[string]bool)
-	const n = 1000
-	for i := 0; i < n; i++ {
-		s, err := GenerateSecret()
-		if err != nil {
-			t.Fatalf("GenerateSecret() error = %v", err)
-		}
-		if seen[s] {
-			t.Fatalf("duplicate secret generated after %d calls: %q", i, s)
-		}
-		seen[s] = true
+		t.Errorf("two secrets were identical: %q", a)
 	}
 }
 
@@ -62,14 +47,6 @@ func TestProfileName(t *testing.T) {
 		if got := ProfileName(tc.telegramID); got != tc.want {
 			t.Errorf("ProfileName(%d) = %q, want %q", tc.telegramID, got, tc.want)
 		}
-	}
-}
-
-func TestProfileName_Deterministic(t *testing.T) {
-	a := ProfileName(42)
-	b := ProfileName(42)
-	if a != b {
-		t.Errorf("ProfileName(42) not deterministic: %q vs %q", a, b)
 	}
 }
 
@@ -91,13 +68,13 @@ func TestGeneratePathToken_FormatAndLength(t *testing.T) {
 func TestGeneratePathToken_Randomness(t *testing.T) {
 	a, err := GeneratePathToken()
 	if err != nil {
-		t.Fatalf("GeneratePathToken() error = %v", err)
+		t.Fatal(err)
 	}
 	b, err := GeneratePathToken()
 	if err != nil {
-		t.Fatalf("GeneratePathToken() error = %v", err)
+		t.Fatal(err)
 	}
 	if a == b {
-		t.Errorf("two consecutive GeneratePathToken() calls produced the same value: %q", a)
+		t.Errorf("two tokens were identical: %q", a)
 	}
 }

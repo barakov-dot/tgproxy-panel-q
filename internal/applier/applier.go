@@ -5,111 +5,72 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/config"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/store"
 )
 
-// Sentinel errors identifying which stage of an apply failed, so a future
-// internal/service layer can decide what to do (e.g. whether a rollback is
-// worth attempting) without string-matching error text.
 var (
-	// ErrStateMismatch means the DB row this call expected to already
-	// reflect (profile_name/secret/status) doesn't match what was passed
-	// in — a sign the caller's write ordering is wrong (see IssueProfile's
-	// doc comment) or a concurrent modification happened.
-	ErrStateMismatch = errors.New("applier: db state does not match expected value")
-
-	// ErrValidationFailed means tproxy-server's own `-check` rejected the
-	// candidate profiles.json. Nothing was handed to apply-profiles.sh, so
-	// the live host state is untouched — no rollback needed.
-	ErrValidationFailed = errors.New("applier: candidate profiles.json failed -check validation")
-
-	// ErrApplyScriptFailed means `sudo apply-profiles.sh <candidate>`
-	// exited non-zero. The rollback contract we expect from that future
-	// script: apply-profiles.sh backs up the live profiles.json *before*
-	// overwriting it, and must leave the live file and the service
-	// untouched (not restarted) if anything after the backup fails, so a
-	// non-zero exit here means the host is still running the previous,
-	// known-good configuration — no rollback action is needed on our side
-	// either. If that invariant ever changes, this comment and the
-	// service-layer rollback logic built on top of it both need updating.
+	ErrStateMismatch    = errors.New("applier: db state does not match expected value")
+	ErrValidationFailed = errors.New("applier: candidate profiles.json failed validation")
 	ErrApplyScriptFailed = errors.New("applier: apply-profiles.sh failed")
-
-	// ErrNotReady means apply-profiles.sh reported success (it already
-	// restarted tproxy-server itself, see CLAUDE.md's directory-structure
-	// bullet for that script) but /readyz never returned 200 within the
-	// retry budget. Unlike the two errors above, this is the one case
-	// where the *live* file has already changed — a caller wanting to
-	// roll back needs apply-profiles.sh's cooperation to restore its own
-	// backup, which is out of scope for this stage (no such script exists
-	// yet); for now we only guarantee the DB is left untouched by us, and
-	// the service layer must not flip a user to active/revoked when it
-	// sees this error.
-	ErrNotReady = errors.New("applier: tproxy-server did not become ready after restart")
+	ErrNotReady         = errors.New("applier: tproxy-server did not become ready after restart")
+	ErrRollbackFailed   = errors.New("applier: rollback failed")
 )
 
-// storeIface is the subset of *store.Store this package needs: read the
-// desired state (userLister, in desired.go) plus look up one user for the
-// consistency check in Issue/RevokeProfile.
 type storeIface interface {
 	userLister
 	GetUserByTelegramID(ctx context.Context, telegramID int64) (*models.User, error)
 }
 
-// Applier is the only type in the codebase allowed to shell out to
-// sudo/tproxy-server/systemctl-adjacent tooling or poll the tproxy-server
-// admin API. See the package doc comment in profiles.go for the
-// declarative, DB-is-source-of-truth design this is built on.
+// Applier pushes desired profiles.json state to the host.
 type Applier struct {
 	cfg   *config.Config
 	store storeIface
 
-	runner     commandRunner
+	runner     Runner
 	httpClient *http.Client
 
 	healthCheckAttempts int
 	healthCheckInterval time.Duration
 }
 
-// New builds an Applier for production use: real exec.Command calls, a
-// real HTTP client, and the retry timing matched to tproxy-server's own
-// install.sh (20 attempts, 1s apart).
-func New(cfg *config.Config, s storeIface) *Applier {
+// Store wraps *store.Store for use with New.
+type Store struct {
+	*store.Store
+}
+
+func (s Store) ListUsers(ctx context.Context) ([]*models.User, error) {
+	return s.Store.ListUsers(ctx, store.UserListFilter{}, store.UserListSort{})
+}
+
+// New builds an Applier for production use.
+func New(cfg *config.Config, s Store) *Applier {
 	return &Applier{
 		cfg:                 cfg,
 		store:               s,
-		runner:              execCommandRunner{},
+	 runner:              execRunner{},
 		httpClient:          &http.Client{Timeout: 5 * time.Second},
 		healthCheckAttempts: defaultHealthCheckAttempts,
 		healthCheckInterval: defaultHealthCheckInterval,
 	}
 }
 
-// Result describes the outcome of a successful apply, for the service
-// layer to log/audit. It carries no secrets.
+// Result describes a successful apply (no secrets).
 type Result struct {
 	CandidatePath  string
 	ProfileCount   int
 	ApplyStdout    string
 	ApplyStderr    string
 	HealthAttempts int
+	RolledBack     bool
 }
 
-// IssueProfile makes the host match the DB's desired state after a new
-// active profile has been recorded.
-//
-// Ordering contract with the future internal/service layer: this method
-// does NOT call store.IssueUser — per CLAUDE.md's package-boundary
-// convention, DB orchestration belongs to internal/service, not here.
-// service must call store.IssueUser(telegramID, profileName, secret)
-// *before* calling IssueProfile, then call this to push the resulting
-// desired state to the host. profileName/secret are passed in purely as a
-// consistency check (protects against a caller bug or a race clobbering
-// the row between the DB write and this call) — the actual desired list
-// handed to the host is always recomputed fresh from every active user in
-// the DB, this one included.
+// IssueProfile applies after the DB records an active profile for telegramID.
 func (a *Applier) IssueProfile(ctx context.Context, telegramID int64, profileName, secret string) (*Result, error) {
 	u, err := a.store.GetUserByTelegramID(ctx, telegramID)
 	if err != nil {
@@ -123,9 +84,7 @@ func (a *Applier) IssueProfile(ctx context.Context, telegramID int64, profileNam
 	return a.apply(ctx)
 }
 
-// RevokeProfile makes the host match the DB's desired state after a
-// profile has been revoked. Same ordering contract as IssueProfile: call
-// store.RevokeUser first, then this.
+// RevokeProfile applies after the DB records a revoked user.
 func (a *Applier) RevokeProfile(ctx context.Context, telegramID int64) (*Result, error) {
 	u, err := a.store.GetUserByTelegramID(ctx, telegramID)
 	if err != nil {
@@ -138,9 +97,6 @@ func (a *Applier) RevokeProfile(ctx context.Context, telegramID int64) (*Result,
 	return a.apply(ctx)
 }
 
-// apply runs the full flow: compute desired state, stage a candidate file,
-// validate it with tproxy-server -check, hand it to apply-profiles.sh via
-// sudo, then poll /readyz.
 func (a *Applier) apply(ctx context.Context) (*Result, error) {
 	pf, err := desiredProfiles(ctx, a.store, a.cfg)
 	if err != nil {
@@ -152,17 +108,29 @@ func (a *Applier) apply(ctx context.Context) (*Result, error) {
 		return nil, err
 	}
 
-	if _, stderr, err := a.runner.Run(ctx, a.cfg.TproxyServerBin,
-		"-config", a.cfg.TproxyConfigPath, "-profiles-file", candidatePath, "-check"); err != nil {
-		return nil, fmt.Errorf("%w: %v: %s", ErrValidationFailed, err, stderr)
+	if err := a.validateCandidate(ctx, candidatePath); err != nil {
+		return nil, err
 	}
 
-	stdout, stderr, err := a.runner.Run(ctx, "sudo", a.cfg.ApplyProfilesScript, candidatePath)
+	if _, err := backupProfiles(a.cfg.TproxyProfilesPath, a.cfg.BackupDir, a.cfg.BackupKeep); err != nil {
+		if !isUnreadableProfiles(err) {
+			return nil, err
+		}
+	}
+
+	stdout, stderr, err := a.runApplyScript(ctx, candidatePath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v: %s", ErrApplyScriptFailed, err, stderr)
 	}
 
-	if err := waitForReady(ctx, a.httpClient, a.cfg.TproxyAdminURL, a.healthCheckAttempts, a.healthCheckInterval); err != nil {
+	if err := waitForHealthy(ctx, a.runner, a.httpClient, a.cfg, a.healthCheckAttempts, a.healthCheckInterval); err != nil {
+		rolledBack, rbErr := a.rollback(ctx)
+		if rbErr != nil {
+			return nil, fmt.Errorf("%w: health check: %v; rollback: %v", ErrNotReady, err, rbErr)
+		}
+		if rolledBack {
+			return nil, fmt.Errorf("%w: %v (rolled back to previous profiles)", ErrNotReady, err)
+		}
 		return nil, err
 	}
 
@@ -173,4 +141,60 @@ func (a *Applier) apply(ctx context.Context) (*Result, error) {
 		ApplyStderr:    stderr,
 		HealthAttempts: a.healthCheckAttempts,
 	}, nil
+}
+
+func (a *Applier) validateCandidate(ctx context.Context, candidatePath string) error {
+	if _, err := ReadProfiles(candidatePath); err != nil {
+		return fmt.Errorf("%w: %v", ErrValidationFailed, err)
+	}
+
+	if a.cfg.TproxyServerBin == "" {
+		return nil
+	}
+	if _, err := os.Stat(a.cfg.TproxyServerBin); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("applier: stat tproxy-server binary: %w", err)
+	}
+
+	if _, stderr, err := a.runner.Run(ctx, a.cfg.TproxyServerBin,
+		"-config", a.cfg.TproxyConfigPath, "-profiles-file", candidatePath, "-check"); err != nil {
+		return fmt.Errorf("%w: %v: %s", ErrValidationFailed, err, stderr)
+	}
+	return nil
+}
+
+func (a *Applier) runApplyScript(ctx context.Context, candidatePath string) (stdout, stderr string, err error) {
+	if os.Getenv("RUN_AS_ROOT") == "1" {
+		return a.runner.Run(ctx, a.cfg.ApplyProfilesScript, candidatePath)
+	}
+	return a.runner.Run(ctx, "sudo", a.cfg.ApplyProfilesScript, candidatePath)
+}
+
+func (a *Applier) rollback(ctx context.Context) (bool, error) {
+	backupPath, err := latestBackup(a.cfg.BackupDir)
+	if err != nil {
+		return false, fmt.Errorf("%w: find backup: %v", ErrRollbackFailed, err)
+	}
+
+	if _, stderr, err := a.runApplyScript(ctx, backupPath); err != nil {
+		return false, fmt.Errorf("%w: %v: %s", ErrRollbackFailed, err, stderr)
+	}
+
+	if err := waitForHealthy(ctx, a.runner, a.httpClient, a.cfg, a.healthCheckAttempts, a.healthCheckInterval); err != nil {
+		return true, fmt.Errorf("%w: post-rollback health: %v", ErrRollbackFailed, err)
+	}
+	return true, nil
+}
+
+func isUnreadableProfiles(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) || errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "permission denied") || strings.Contains(msg, "operation not permitted")
 }

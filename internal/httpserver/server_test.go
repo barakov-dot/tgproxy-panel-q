@@ -1,13 +1,15 @@
 package httpserver
 
 import (
+	"fmt"
 	"log/slog"
 	"testing"
 
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/auth"
-	"github.com/barakov-dot/tgproxy-panel/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/auth"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/service"
 )
 
 const testAdminPassword = "correct horse battery staple"
@@ -43,15 +45,21 @@ func newTestServer(t *testing.T) *testServer {
 
 	sessions := auth.NewSessions(cfg.SessionSecret)
 	limiter := auth.NewDefaultLoginLimiter()
+	svc := service.New(cfg, fs, fa, nil)
+	svc.GenSecret = func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil }
+	svc.ProfileName = func(id int64) string { return fmt.Sprintf("user_%d", id) }
 
-	srv, err := New(cfg, fs, fa, sessions, limiter, slog.New(slog.DiscardHandler))
+	srv, err := New(cfg, svc, sessions, limiter, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return &testServer{Server: srv, store: fs, applier: fa, cfg: cfg}
 }
 
-// loggedInCookie returns a valid session cookie value for use in requests.
 func (ts *testServer) loggedInCookie() string {
 	return ts.sessions.New()
+}
+
+func (ts *testServer) base() string {
+	return "/" + ts.cfg.PanelPathToken
 }

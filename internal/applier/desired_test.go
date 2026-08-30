@@ -5,8 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/config"
-	"github.com/barakov-dot/tgproxy-panel/internal/store"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/store"
 )
 
 func openTestStore(t *testing.T) *store.Store {
@@ -28,95 +29,84 @@ func testConfig() *config.Config {
 	}
 }
 
-func TestDesiredProfiles_OnlyActiveUsers(t *testing.T) {
-	ctx := context.Background()
-	s := openTestStore(t)
-
-	// pending: not yet issued, must not appear.
-	if _, err := s.CreateUser(ctx, 111, strPtr("pending_user"), nil, nil); err != nil {
-		t.Fatalf("CreateUser() error = %v", err)
-	}
-
-	// active: must appear.
-	if _, err := s.CreateUser(ctx, 222, strPtr("active_user"), nil, nil); err != nil {
-		t.Fatalf("CreateUser() error = %v", err)
-	}
-	if _, err := s.IssueUser(ctx, 222, "user_222", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); err != nil {
-		t.Fatalf("IssueUser() error = %v", err)
-	}
-
-	// revoked: must not appear.
-	if _, err := s.CreateUser(ctx, 333, strPtr("revoked_user"), nil, nil); err != nil {
-		t.Fatalf("CreateUser() error = %v", err)
-	}
-	if _, err := s.IssueUser(ctx, 333, "user_333", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"); err != nil {
-		t.Fatalf("IssueUser() error = %v", err)
-	}
-	if _, err := s.RevokeUser(ctx, 333); err != nil {
-		t.Fatalf("RevokeUser() error = %v", err)
-	}
-
-	pf, err := desiredProfiles(ctx, s, testConfig())
+func issueUser(t *testing.T, ctx context.Context, s *store.Store, tgID int64, profileName, secret string) {
+	t.Helper()
+	u, err := s.CreateUser(ctx, tgID, nil, nil, nil)
 	if err != nil {
-		t.Fatalf("desiredProfiles() error = %v", err)
+		t.Fatalf("CreateUser() error = %v", err)
 	}
-	if len(pf.Profiles) != 1 {
-		t.Fatalf("len(Profiles) = %d, want 1: %+v", len(pf.Profiles), pf.Profiles)
-	}
-	p := pf.Profiles[0]
-	if p.Name != "user_222" || p.Secret != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-		t.Errorf("unexpected profile: %+v", p)
-	}
-	if p.Backend != "127.0.0.1:2398" || p.CarrierMode != "https" {
-		t.Errorf("backend/carrier_mode not taken from config: %+v", p)
+	if _, err := s.SetUserProfile(ctx, u.ID, profileName, secret, true); err != nil {
+		t.Fatalf("SetUserProfile() error = %v", err)
 	}
 }
 
-func TestDesiredProfiles_EmptyWhenNoActiveUsers(t *testing.T) {
-	ctx := context.Background()
-	s := openTestStore(t)
-
-	pf, err := desiredProfiles(ctx, s, testConfig())
+func revokeUser(t *testing.T, ctx context.Context, s *store.Store, tgID int64) {
+	t.Helper()
+	u, err := s.GetUserByTelegramID(ctx, tgID)
 	if err != nil {
-		t.Fatalf("desiredProfiles() error = %v", err)
+		t.Fatalf("GetUserByTelegramID() error = %v", err)
 	}
-	if len(pf.Profiles) != 0 {
-		t.Errorf("len(Profiles) = %d, want 0", len(pf.Profiles))
+	if _, err := s.UpdateUserStatus(ctx, u.ID, models.StatusRevoked); err != nil {
+		t.Fatalf("UpdateUserStatus() error = %v", err)
 	}
 }
 
-func TestDesiredProfiles_MultipleActiveUsersShareBackend(t *testing.T) {
+func TestDesiredProfiles(t *testing.T) {
 	ctx := context.Background()
-	s := openTestStore(t)
 
-	tgIDs := []int64{1001, 1002, 1003}
-	for i, tgID := range tgIDs {
-		if _, err := s.CreateUser(ctx, tgID, nil, nil, nil); err != nil {
-			t.Fatalf("CreateUser() error = %v", err)
-		}
-		profileName := "user_" + strPtrHex(i)[:8]
-		if _, err := s.IssueUser(ctx, tgID, profileName, strPtrHex(i)); err != nil {
-			t.Fatalf("IssueUser() error = %v", err)
-		}
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, s *store.Store)
+		wantCount int
+	}{
+		{
+			name:      "empty",
+			setup:     func(t *testing.T, s *store.Store) {},
+			wantCount: 0,
+		},
+		{
+			name: "only active",
+			setup: func(t *testing.T, s *store.Store) {
+				if _, err := s.CreateUser(ctx, 111, strPtr("pending"), nil, nil); err != nil {
+					t.Fatal(err)
+				}
+				issueUser(t, ctx, s, 222, "user_222", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+				issueUser(t, ctx, s, 333, "user_333", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+				revokeUser(t, ctx, s, 333)
+			},
+			wantCount: 1,
+		},
+		{
+			name: "multiple active share backend",
+			setup: func(t *testing.T, s *store.Store) {
+				for i, tgID := range []int64{1001, 1002, 1003} {
+					issueUser(t, ctx, s, tgID, "user_"+strPtrHex(i)[:8], strPtrHex(i))
+				}
+			},
+			wantCount: 3,
+		},
 	}
 
-	pf, err := desiredProfiles(ctx, s, testConfig())
-	if err != nil {
-		t.Fatalf("desiredProfiles() error = %v", err)
-	}
-	if len(pf.Profiles) != len(tgIDs) {
-		t.Fatalf("len(Profiles) = %d, want %d: %+v", len(pf.Profiles), len(tgIDs), pf.Profiles)
-	}
-	for _, p := range pf.Profiles {
-		if p.Backend != "127.0.0.1:2398" || p.CarrierMode != "https" {
-			t.Errorf("profile %q does not share config backend/carrier_mode: %+v", p.Name, p)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTestStore(t)
+			tt.setup(t, s)
+			pf, err := desiredProfiles(ctx, Store{s}, testConfig())
+			if err != nil {
+				t.Fatalf("desiredProfiles() error = %v", err)
+			}
+			if len(pf.Profiles) != tt.wantCount {
+				t.Fatalf("len(Profiles) = %d, want %d: %+v", len(pf.Profiles), tt.wantCount, pf.Profiles)
+			}
+			for _, p := range pf.Profiles {
+				if p.Backend != "127.0.0.1:2398" || p.CarrierMode != "https" {
+					t.Errorf("profile %q missing shared backend/carrier_mode: %+v", p.Name, p)
+				}
+			}
+		})
 	}
 }
 
-// strPtrHex returns a distinct 32-hex-char string for index i, for tests
-// that need multiple unique secrets without caring about their exact
-// value.
 func strPtrHex(i int) string {
 	digits := "0123456789abcdef"
 	b := make([]byte, 32)

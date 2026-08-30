@@ -19,9 +19,6 @@ func TestReadLine(t *testing.T) {
 	}
 }
 
-// TestRunHashPasswordNonInteractive exercises the path deploy/install.sh
-// actually uses: piping a password to `tgproxy-panel -hash-password` over
-// stdin (a non-terminal *os.File, via os.Pipe) and capturing stdout.
 func TestRunHashPasswordNonInteractive(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -45,10 +42,10 @@ func TestRunHashPasswordNonInteractive(t *testing.T) {
 		t.Fatalf("hash = %q, want $2.. bcrypt prefix", hash)
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte("correct horse battery staple")); err != nil {
-		t.Fatalf("generated hash does not verify against the original password: %v", err)
+		t.Fatalf("generated hash does not verify: %v", err)
 	}
 	if errOut.Len() != 0 {
-		t.Fatalf("errOut = %q, want empty (no prompt expected on a non-terminal stdin)", errOut.String())
+		t.Fatalf("errOut = %q, want empty", errOut.String())
 	}
 }
 
@@ -67,6 +64,6 @@ func TestRunHashPasswordRejectsEmptyPassword(t *testing.T) {
 
 	var out, errOut bytes.Buffer
 	if err := runHashPassword(r, &out, &errOut); err == nil {
-		t.Fatal("runHashPassword: expected an error for an empty password, got nil")
+		t.Fatal("runHashPassword: expected error for empty password")
 	}
 }

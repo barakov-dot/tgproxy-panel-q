@@ -16,6 +16,9 @@ import (
 // mandate a value, and it isn't exposed as a config knob.
 const SessionLifetime = 24 * time.Hour
 
+// SessionCookieName is the panel's session cookie name.
+const SessionCookieName = "tgproxy_panel_session"
+
 // cookieSep separates the base64 payload from its base64 signature in a
 // cookie value. It can't appear in unpadded base64url output, so splitting
 // on it is unambiguous.

@@ -1,15 +1,14 @@
-// Package models holds the plain data types shared by internal/store,
-// internal/httpserver, internal/bot and internal/service. It has no
-// dependencies on any other internal package.
+// Package models holds shared data types for store, service, httpserver, and bot.
 package models
 
 import (
+	"fmt"
+	"net/url"
 	"strconv"
 	"time"
 )
 
-// UserStatus is the lifecycle state of a user's proxy access request, per
-// plan.md §4's CHECK(status IN (...)) constraint.
+// UserStatus is the lifecycle state of a user's proxy access request.
 type UserStatus string
 
 const (
@@ -28,9 +27,7 @@ func (s UserStatus) Valid() bool {
 	return false
 }
 
-// User mirrors the `users` table in plan.md §4. Username, FirstName,
-// LastName, ProfileName and Secret are nullable columns and use pointers so
-// "not set" is distinguishable from an empty string.
+// User mirrors the users table. Nullable columns use pointers.
 type User struct {
 	ID          int64
 	TelegramID  int64
@@ -45,19 +42,10 @@ type User struct {
 	RevokedAt   *time.Time
 }
 
-// IsActive reports whether the user currently has a live proxy profile.
-func (u *User) IsActive() bool {
-	return u.Status == StatusActive
-}
+func (u *User) IsActive() bool  { return u.Status == StatusActive }
+func (u *User) IsPending() bool { return u.Status == StatusPending }
 
-// IsPending reports whether the user has a request awaiting admin review.
-func (u *User) IsPending() bool {
-	return u.Status == StatusPending
-}
-
-// DisplayName returns the best available human-readable name for the user:
-// "First Last", falling back to "@username", falling back to the numeric
-// Telegram ID.
+// DisplayName returns "First Last", then "@username", then the Telegram ID.
 func (u *User) DisplayName() string {
 	first, last := "", ""
 	if u.FirstName != nil {
@@ -80,4 +68,19 @@ func (u *User) DisplayName() string {
 		return "@" + *u.Username
 	}
 	return strconv.FormatInt(u.TelegramID, 10)
+}
+
+// ProxyLink builds the t.me/webproxy deep link when hostname and secret are set.
+func (u *User) ProxyLink(hostname string) string {
+	if hostname == "" || u.Secret == nil || *u.Secret == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://t.me/webproxy?server=%s&secret=%s",
+		url.QueryEscape(hostname), url.QueryEscape(*u.Secret))
+}
+
+// HasProfile reports whether profile_name and secret are both set.
+func (u *User) HasProfile() bool {
+	return u.ProfileName != nil && *u.ProfileName != "" &&
+		u.Secret != nil && *u.Secret != ""
 }

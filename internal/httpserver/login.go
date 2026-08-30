@@ -3,7 +3,7 @@ package httpserver
 import (
 	"net/http"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/auth"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/auth"
 )
 
 type loginPageData struct {
@@ -12,8 +12,7 @@ type loginPageData struct {
 }
 
 func (s *Server) handleLoginForm(w http.ResponseWriter, r *http.Request) {
-	// Already logged in — skip straight to the user list.
-	if c, err := r.Cookie(sessionCookieName); err == nil && s.sessions.Verify(c.Value) {
+	if c, err := r.Cookie(auth.SessionCookieName); err == nil && s.sessions.Verify(c.Value) {
 		http.Redirect(w, r, s.base()+"/", http.StatusSeeOther)
 		return
 	}
@@ -48,33 +47,11 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	s.limiter.RecordSuccess(key)
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    s.sessions.New(),
-		Path:     "/",
-		HttpOnly: true,
-		// Secure is safe to hardcode: per plan.md §2 this process is only
-		// ever reached through Caddy terminating TLS in front of it, so the
-		// browser always sees an https:// origin even though this backend
-		// itself speaks plain HTTP to Caddy on loopback. Testing directly
-		// against http://127.0.0.1:$PANEL_PORT without Caddy in front will
-		// not persist the cookie in a real browser — that's intentional.
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(auth.SessionLifetime.Seconds()),
-	})
+	http.SetCookie(w, auth.SessionCookie(s.sessions.New()))
 	http.Redirect(w, r, s.base()+"/", http.StatusSeeOther)
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	})
+	http.SetCookie(w, auth.ClearSessionCookie())
 	http.Redirect(w, r, s.base()+"/login", http.StatusSeeOther)
 }

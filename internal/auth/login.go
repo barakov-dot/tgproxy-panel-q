@@ -1,8 +1,7 @@
 // Package auth implements tgproxy-panel's login check, signed session
 // cookies, and login-attempt rate limiting (plan.md §5). It is
-// framework-agnostic: no net/http handlers live here (that's
-// internal/httpserver), only the pure logic and the http.Cookie vocabulary
-// needed to build one.
+// framework-agnostic except for RequireSession middleware and cookie
+// helpers; HTTP handlers live in internal/httpserver.
 package auth
 
 import (

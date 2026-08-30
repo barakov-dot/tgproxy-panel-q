@@ -1,32 +1,67 @@
 package qrcode
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
-func TestPNG(t *testing.T) {
-	png, err := PNG("https://t.me/webproxy?server=proxy.example.com&secret=abc123", 256)
-	if err != nil {
-		t.Fatalf("PNG: %v", err)
+var pngMagic = []byte{0x89, 'P', 'N', 'G'}
+
+func TestGeneratePNG(t *testing.T) {
+	cases := []struct {
+		name string
+		link string
+		size int
+	}{
+		{
+			name: "proxy deep link",
+			link: "https://t.me/webproxy?server=proxy.example.com&secret=abc123",
+			size: 256,
+		},
+		{
+			name: "short link",
+			link: "https://example.com",
+			size: 128,
+		},
+		{
+			name: "minimal size",
+			link: "hello",
+			size: 1,
+		},
 	}
-	if len(png) == 0 {
-		t.Fatal("PNG: got empty output")
-	}
-	// PNG magic number.
-	want := []byte{0x89, 'P', 'N', 'G'}
-	for i, b := range want {
-		if png[i] != b {
-			t.Fatalf("PNG: output does not start with PNG magic bytes, got %v", png[:4])
-		}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			png, err := GeneratePNG(tc.link, tc.size)
+			if err != nil {
+				t.Fatalf("GeneratePNG() error = %v", err)
+			}
+			if len(png) == 0 {
+				t.Fatal("GeneratePNG() returned empty output")
+			}
+			if !bytes.HasPrefix(png, pngMagic) {
+				t.Fatalf("GeneratePNG() output does not start with PNG magic bytes, got %v", png[:4])
+			}
+		})
 	}
 }
 
-func TestPNGValidation(t *testing.T) {
-	if _, err := PNG("", 256); err == nil {
-		t.Error("PNG: expected error for empty content")
+func TestGeneratePNGValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		link string
+		size int
+	}{
+		{name: "empty link", link: "", size: 256},
+		{name: "zero size", link: "hello", size: 0},
+		{name: "negative size", link: "hello", size: -1},
 	}
-	if _, err := PNG("hello", 0); err == nil {
-		t.Error("PNG: expected error for zero size")
-	}
-	if _, err := PNG("hello", -1); err == nil {
-		t.Error("PNG: expected error for negative size")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := GeneratePNG(tc.link, tc.size); err == nil {
+				t.Fatal("GeneratePNG() expected error")
+			}
+		})
 	}
 }

@@ -30,7 +30,7 @@ func TestSetAutoIssueTogglesSetting(t *testing.T) {
 	ts := newTestServer(t)
 
 	rr := ts.authedRequest(t, http.MethodPost, ts.base()+"/settings/auto-issue", strings.NewReader("auto_issue=on"))
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 
@@ -41,7 +41,7 @@ func TestSetAutoIssueTogglesSetting(t *testing.T) {
 
 	// Unchecking: the browser omits the field entirely.
 	rr = ts.authedRequest(t, http.MethodPost, ts.base()+"/settings/auto-issue", strings.NewReader(""))
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d", rr.Code)
 	}
 	got, ok = ts.store.settings["auto_issue"]

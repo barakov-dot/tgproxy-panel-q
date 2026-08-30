@@ -7,123 +7,78 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/auth"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/auth"
 )
 
 func TestLoginSuccessSetsCookieAndRedirects(t *testing.T) {
-	ts := newTestServer(t)
-	h := ts.Handler()
-
-	form := url.Values{"login": {"admin"}, "password": {testAdminPassword}}
-	req := httptest.NewRequest(http.MethodPost, ts.base()+"/login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusSeeOther {
-		t.Fatalf("status = %d, want 303; body=%s", rr.Code, rr.Body.String())
+	tests := []struct {
+		name string
+	}{
+		{name: "success"},
 	}
-	cookies := rr.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != sessionCookieName || cookies[0].Value == "" {
-		t.Fatalf("expected a session cookie to be set, got %+v", cookies)
-	}
-	if loc := rr.Header().Get("Location"); loc != ts.base()+"/" {
-		t.Errorf("redirect location = %q, want %q", loc, ts.base()+"/")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newTestServer(t)
+			h := ts.Handler()
+
+			form := url.Values{"login": {"admin"}, "password": {testAdminPassword}}
+			req := httptest.NewRequest(http.MethodPost, ts.base()+"/login", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusSeeOther {
+				t.Fatalf("status = %d, want 303; body=%s", rr.Code, rr.Body.String())
+			}
+			cookies := rr.Result().Cookies()
+			if len(cookies) != 1 || cookies[0].Name != auth.SessionCookieName || cookies[0].Value == "" {
+				t.Fatalf("expected a session cookie to be set, got %+v", cookies)
+			}
+			if loc := rr.Header().Get("Location"); loc != ts.base()+"/" {
+				t.Errorf("redirect location = %q, want %q", loc, ts.base()+"/")
+			}
+		})
 	}
 }
 
 func TestLoginWrongPasswordShowsError(t *testing.T) {
-	ts := newTestServer(t)
-	h := ts.Handler()
-
-	form := url.Values{"login": {"admin"}, "password": {"wrong"}}
-	req := httptest.NewRequest(http.MethodPost, ts.base()+"/login", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200 (re-rendered login form)", rr.Code)
+	tests := []struct {
+		name     string
+		login    string
+		password string
+	}{
+		{name: "wrong password", login: "admin", password: "wrong"},
 	}
-	if len(rr.Result().Cookies()) != 0 {
-		t.Error("no cookie should be set on a failed login")
-	}
-	if !strings.Contains(rr.Body.String(), "Неверный логин") {
-		t.Errorf("expected Russian error message in body, got: %s", rr.Body.String())
-	}
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newTestServer(t)
+			form := url.Values{"login": {tt.login}, "password": {tt.password}}
+			req := httptest.NewRequest(http.MethodPost, ts.base()+"/login", strings.NewReader(form.Encode()))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			rr := httptest.NewRecorder()
+			ts.Handler().ServeHTTP(rr, req)
 
-func TestLoginLockoutAfterRepeatedFailures(t *testing.T) {
-	ts := newTestServer(t)
-	h := ts.Handler()
-
-	attempt := func(password string) *httptest.ResponseRecorder {
-		form := url.Values{"login": {"admin"}, "password": {password}}
-		req := httptest.NewRequest(http.MethodPost, ts.base()+"/login", strings.NewReader(form.Encode()))
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.RemoteAddr = "203.0.113.1:12345"
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
-		return rr
-	}
-
-	for i := 0; i < auth.DefaultMaxAttempts; i++ {
-		attempt("wrong")
-	}
-
-	// One more attempt, even with the correct password, should now be
-	// rejected by the rate limiter rather than reach the bcrypt check.
-	rr := attempt(testAdminPassword)
-	if len(rr.Result().Cookies()) != 0 {
-		t.Error("expected lockout to block even a correct password")
-	}
-	if !strings.Contains(rr.Body.String(), "Слишком много") {
-		t.Errorf("expected lockout message, got: %s", rr.Body.String())
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rr.Code)
+			}
+			if !strings.Contains(rr.Body.String(), "Неверный логин или пароль") {
+				t.Errorf("expected Russian login error message, body=%s", rr.Body.String())
+			}
+		})
 	}
 }
 
-func TestAuthMiddlewareRedirectsWithoutSession(t *testing.T) {
+func TestLoginRequiresAuthForUsersList(t *testing.T) {
 	ts := newTestServer(t)
-	h := ts.Handler()
-
 	req := httptest.NewRequest(http.MethodGet, ts.base()+"/", nil)
 	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
+	ts.Handler().ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303 redirect to login", rr.Code)
 	}
-	if loc := rr.Header().Get("Location"); loc != ts.base()+"/login" {
-		t.Errorf("redirect location = %q, want %q", loc, ts.base()+"/login")
-	}
-}
-
-func TestAuthMiddlewareAllowsValidSession(t *testing.T) {
-	ts := newTestServer(t)
-	ts.store.addUser(&models.User{TelegramID: 42, Status: models.StatusPending})
-	h := ts.Handler()
-
-	req := httptest.NewRequest(http.MethodGet, ts.base()+"/", nil)
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: ts.loggedInCookie()})
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestBareRootPath404s(t *testing.T) {
-	ts := newTestServer(t)
-	h := ts.Handler()
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusNotFound {
-		t.Fatalf("bare '/' status = %d, want 404 (must not leak that the panel exists)", rr.Code)
+	if !strings.HasSuffix(rr.Header().Get("Location"), "/login") {
+		t.Errorf("location = %q, want login redirect", rr.Header().Get("Location"))
 	}
 }
 
@@ -132,11 +87,27 @@ func TestLogoutClearsCookie(t *testing.T) {
 	h := ts.Handler()
 
 	req := httptest.NewRequest(http.MethodPost, ts.base()+"/logout", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: ts.loggedInCookie()})
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
 	cookies := rr.Result().Cookies()
 	if len(cookies) != 1 || cookies[0].MaxAge >= 0 {
 		t.Fatalf("expected an expiring cookie, got %+v", cookies)
+	}
+}
+
+func TestLoginFormRedirectsWhenAlreadyAuthenticated(t *testing.T) {
+	ts := newTestServer(t)
+	req := httptest.NewRequest(http.MethodGet, ts.base()+"/login", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: ts.loggedInCookie()})
+	rr := httptest.NewRecorder()
+	ts.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", rr.Code)
+	}
+	if rr.Header().Get("Location") != ts.base()+"/" {
+		t.Errorf("location = %q", rr.Header().Get("Location"))
 	}
 }

@@ -2,6 +2,7 @@ package applier
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -14,15 +15,13 @@ func TestProfilesFile_JSONShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)
 	}
-	got := string(data)
 	want := `{"profiles":[{"name":"user_1","secret":"0123456789abcdef0123456789abcdef","backend":"127.0.0.1:2398","carrier_mode":"https"}]}`
-	if got != want {
-		t.Errorf("Marshal() = %s, want %s", got, want)
+	if string(data) != want {
+		t.Errorf("Marshal() = %s, want %s", data, want)
 	}
 }
 
 func TestProfilesFile_UnmarshalMatchesUpstreamExample(t *testing.T) {
-	// Matches profiles.example.json verbatim (CLAUDE.md verified facts).
 	const example = `{
 	  "profiles": [
 	    {
@@ -47,75 +46,106 @@ func TestProfilesFile_UnmarshalMatchesUpstreamExample(t *testing.T) {
 	}
 }
 
-func TestAddProfile_Success(t *testing.T) {
-	var pf ProfilesFile
-	if err := pf.AddProfile(Profile{Name: "user_1", Secret: "a"}); err != nil {
-		t.Fatalf("AddProfile() error = %v", err)
+func TestProfilesFile_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		pf      ProfilesFile
+		wantErr string
+	}{
+		{
+			name: "valid empty",
+			pf:   ProfilesFile{},
+		},
+		{
+			name: "valid single",
+			pf: ProfilesFile{Profiles: []Profile{
+				{Name: "user_1", Secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Backend: "127.0.0.1:2398", CarrierMode: "https"},
+			}},
+		},
+		{
+			name: "missing name",
+			pf: ProfilesFile{Profiles: []Profile{
+				{Secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+			}},
+			wantErr: "missing name",
+		},
+		{
+			name: "missing secret",
+			pf: ProfilesFile{Profiles: []Profile{
+				{Name: "user_1"},
+			}},
+			wantErr: "missing secret",
+		},
+		{
+			name: "duplicate name",
+			pf: ProfilesFile{Profiles: []Profile{
+				{Name: "user_1", Secret: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+				{Name: "user_1", Secret: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+			}},
+			wantErr: "duplicate profile name",
+		},
+		{
+			name: "duplicate secret",
+			pf: ProfilesFile{Profiles: []Profile{
+				{Name: "user_1", Secret: "sharedsecretsharedsecretsharedsec"},
+				{Name: "user_2", Secret: "sharedsecretsharedsecretsharedsec"},
+			}},
+			wantErr: "collides",
+		},
 	}
-	if err := pf.AddProfile(Profile{Name: "user_2", Secret: "b"}); err != nil {
-		t.Fatalf("AddProfile() error = %v", err)
-	}
-	if len(pf.Profiles) != 2 {
-		t.Fatalf("len(Profiles) = %d, want 2", len(pf.Profiles))
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.pf.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Validate() expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate() error = %q, want substring %q", err.Error(), tt.wantErr)
+			}
+		})
 	}
 }
 
-func TestAddProfile_NameCollision(t *testing.T) {
-	var pf ProfilesFile
-	must(t, pf.AddProfile(Profile{Name: "user_1", Secret: "a"}))
-	err := pf.AddProfile(Profile{Name: "user_1", Secret: "b"})
-	if err == nil {
-		t.Fatal("AddProfile() with duplicate name: expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "user_1") {
-		t.Errorf("error %q does not mention colliding name", err.Error())
-	}
-	if len(pf.Profiles) != 1 {
-		t.Errorf("len(Profiles) = %d, want 1 (rejected add must not mutate)", len(pf.Profiles))
-	}
-}
+func TestReadWriteProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/profiles.json"
+	pf := &ProfilesFile{Profiles: []Profile{
+		{Name: "user_1", Secret: "0123456789abcdef0123456789abcdef", Backend: "127.0.0.1:2398", CarrierMode: "https"},
+	}}
 
-func TestAddProfile_SecretCollision(t *testing.T) {
-	var pf ProfilesFile
-	must(t, pf.AddProfile(Profile{Name: "user_1", Secret: "shared"}))
-	err := pf.AddProfile(Profile{Name: "user_2", Secret: "shared"})
-	if err == nil {
-		t.Fatal("AddProfile() with duplicate secret: expected error, got nil")
+	if err := WriteProfiles(path, pf); err != nil {
+		t.Fatalf("WriteProfiles() error = %v", err)
 	}
-	if len(pf.Profiles) != 1 {
-		t.Errorf("len(Profiles) = %d, want 1", len(pf.Profiles))
-	}
-}
-
-func TestRemoveProfile_Success(t *testing.T) {
-	var pf ProfilesFile
-	must(t, pf.AddProfile(Profile{Name: "user_1", Secret: "a"}))
-	must(t, pf.AddProfile(Profile{Name: "user_2", Secret: "b"}))
-
-	if err := pf.RemoveProfile("user_1"); err != nil {
-		t.Fatalf("RemoveProfile() error = %v", err)
-	}
-	if len(pf.Profiles) != 1 || pf.Profiles[0].Name != "user_2" {
-		t.Errorf("unexpected profiles after remove: %+v", pf.Profiles)
-	}
-}
-
-func TestRemoveProfile_NotFound(t *testing.T) {
-	var pf ProfilesFile
-	must(t, pf.AddProfile(Profile{Name: "user_1", Secret: "a"}))
-
-	err := pf.RemoveProfile("does-not-exist")
-	if err == nil {
-		t.Fatal("RemoveProfile() for missing name: expected error, got nil")
-	}
-	if len(pf.Profiles) != 1 {
-		t.Errorf("len(Profiles) = %d, want 1 (failed remove must not mutate)", len(pf.Profiles))
-	}
-}
-
-func must(t *testing.T, err error) {
-	t.Helper()
+	got, err := ReadProfiles(path)
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("ReadProfiles() error = %v", err)
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0].Name != "user_1" {
+		t.Errorf("ReadProfiles() = %+v", got)
+	}
+}
+
+func TestReadProfiles_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/bad.json"
+	if err := WriteProfiles(path, &ProfilesFile{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ReadProfiles(path)
+	if err == nil {
+		t.Fatal("ReadProfiles() expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "parse profiles JSON") {
+		t.Errorf("error = %q", err.Error())
 	}
 }

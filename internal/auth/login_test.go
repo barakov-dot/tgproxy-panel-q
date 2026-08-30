@@ -39,16 +39,23 @@ func TestCheckLogin(t *testing.T) {
 }
 
 func TestConstantTimeStringsEqual(t *testing.T) {
-	if !constantTimeStringsEqual("admin", "admin") {
-		t.Error("equal strings reported unequal")
+	cases := []struct {
+		name string
+		a, b string
+		want bool
+	}{
+		{"equal strings", "admin", "admin", true},
+		{"different length", "admin", "adminn", false},
+		{"non-empty vs empty", "admin", "", false},
+		{"both empty", "", "", true},
 	}
-	if constantTimeStringsEqual("admin", "adminn") {
-		t.Error("different-length strings reported equal")
-	}
-	if constantTimeStringsEqual("admin", "") {
-		t.Error("non-empty vs empty reported equal")
-	}
-	if !constantTimeStringsEqual("", "") {
-		t.Error("two empty strings reported unequal")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := constantTimeStringsEqual(tc.a, tc.b)
+			if got != tc.want {
+				t.Errorf("constantTimeStringsEqual(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+			}
+		})
 	}
 }

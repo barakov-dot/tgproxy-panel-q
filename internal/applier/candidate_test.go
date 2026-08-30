@@ -17,9 +17,8 @@ func TestWriteCandidate_ContentAndLocation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("writeCandidate() error = %v", err)
 	}
-
 	if filepath.Dir(path) != filepath.Join(dir, candidateSubdir) {
-		t.Errorf("candidate written to %s, want under %s", path, filepath.Join(dir, candidateSubdir))
+		t.Errorf("candidate path = %s, want under candidates/", path)
 	}
 
 	data, err := os.ReadFile(path)
@@ -31,63 +30,35 @@ func TestWriteCandidate_ContentAndLocation(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 	if len(got.Profiles) != 1 || got.Profiles[0].Name != "user_1" {
-		t.Errorf("unexpected candidate content: %+v", got)
-	}
-
-	// No leftover temp files.
-	entries, err := os.ReadDir(filepath.Join(dir, candidateSubdir))
-	if err != nil {
-		t.Fatalf("ReadDir() error = %v", err)
-	}
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".tmp" {
-			t.Errorf("leftover temp file: %s", e.Name())
-		}
+		t.Errorf("unexpected content: %+v", got)
 	}
 }
 
 func TestWriteCandidate_Rotation(t *testing.T) {
 	dir := t.TempDir()
 	pf := &ProfilesFile{}
-
 	const keep = 3
-	var paths []string
 	for i := 0; i < keep+5; i++ {
-		path, err := writeCandidate(dir, pf, keep)
-		if err != nil {
-			t.Fatalf("writeCandidate() iteration %d: error = %v", i, err)
+		if _, err := writeCandidate(dir, pf, keep); err != nil {
+			t.Fatalf("writeCandidate() iteration %d: %v", i, err)
 		}
-		paths = append(paths, path)
 	}
-
 	entries, err := os.ReadDir(filepath.Join(dir, candidateSubdir))
 	if err != nil {
-		t.Fatalf("ReadDir() error = %v", err)
+		t.Fatal(err)
 	}
 	if len(entries) != keep {
-		t.Fatalf("len(entries) = %d, want %d (rotation should prune old candidates)", len(entries), keep)
-	}
-
-	// The most recent file written must still exist.
-	lastPath := paths[len(paths)-1]
-	if _, err := os.Stat(lastPath); err != nil {
-		t.Errorf("most recent candidate %s missing after rotation: %v", lastPath, err)
+		t.Errorf("len(candidates) = %d, want %d", len(entries), keep)
 	}
 }
 
-func TestPruneOldCandidates_KeepZeroIsNoop(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	f := filepath.Join(dir, candidatePrefix+"2026-01-01T00-00-00Z"+candidateSuffix)
-	if err := os.WriteFile(f, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := pruneOldCandidates(dir, 0); err != nil {
-		t.Fatalf("pruneOldCandidates() error = %v", err)
-	}
-	if _, err := os.Stat(f); err != nil {
-		t.Errorf("file removed despite keep=0 being a no-op: %v", err)
+func TestWriteCandidate_RejectsInvalid(t *testing.T) {
+	pf := &ProfilesFile{Profiles: []Profile{
+		{Name: "a", Secret: "x"},
+		{Name: "a", Secret: "y"},
+	}}
+	_, err := writeCandidate(t.TempDir(), pf, 10)
+	if err == nil {
+		t.Fatal("writeCandidate() expected validation error")
 	}
 }

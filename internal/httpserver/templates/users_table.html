@@ -1,8 +1,7 @@
 {{define "sort_link"}}
-{{- /* . is a struct{Table usersTableData; Col SortColumn; Label string} */ -}}
 {{$next := "desc"}}{{if and (eq .Table.Sort .Col) (eq .Table.Dir "desc")}}{{$next = "asc"}}{{end}}
-<a href="{{$.Table.Base}}/users/table?sort={{.Col}}&dir={{$next}}&q={{.Table.Query | urlquery}}{{if .Table.OnlyPending}}&filter=pending{{end}}"
-   hx-get="{{$.Table.Base}}/users/table?sort={{.Col}}&dir={{$next}}&q={{.Table.Query | urlquery}}{{if .Table.OnlyPending}}&filter=pending{{end}}"
+<a href="{{$.Table.Base}}/users?sort={{.Col}}&dir={{$next}}&q={{.Table.Query | urlquery}}{{if .Table.OnlyPending}}&filter=pending{{end}}"
+   hx-get="{{$.Table.Base}}/users?sort={{.Col}}&dir={{$next}}&q={{.Table.Query | urlquery}}{{if .Table.OnlyPending}}&filter=pending{{end}}"
    hx-target="#users-table-wrap" hx-swap="innerHTML" hx-push-url="true"
    class="inline-flex items-center gap-1 select-none hover:text-slate-900 dark:hover:text-slate-100">
   {{.Label}}{{if eq .Table.Sort .Col}}<span class="text-slate-400">{{if eq .Table.Dir "asc"}}&uarr;{{else}}&darr;{{end}}</span>{{end}}

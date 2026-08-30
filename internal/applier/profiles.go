@@ -1,27 +1,16 @@
-// Package applier is the only package that touches the live tproxy-server
-// host state. See CLAUDE.md's "Verified facts about tproxy-server" and
-// plan.md §7 for the constraints this file is built against.
-//
-// Architecture: internal/applier is declarative, not diff-based. It never
-// reads the live /etc/tproxy-server/profiles.json — it can't: that file is
-// root:tproxy 0400, and this panel process runs unprivileged (plan.md §7
-// "Права доступа"). Instead, every apply recomputes the *complete* desired
-// profile list straight from the DB (all users with status=active already
-// carry their profile_name/secret, per internal/store) and hands that whole
-// list to the privileged deploy/apply-profiles.sh script via sudo. That
-// script — a future stage, running as root — is the only thing that reads
-// the current file, backs it up, validates, chowns/chmods, atomically
-// renames, restarts tproxy-server and reports back. internal/applier's job
-// stops at "produce a validated candidate file and ask the root script to
-// install it."
+// Package applier is the only package that touches live tproxy-server host state.
+// It recomputes the complete desired profile list from the DB and hands it to the
+// privileged apply-profiles.sh script via sudo. See ARCHITECTURE.md and plan.md §7.
 package applier
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+)
 
-// Profile mirrors one entry of profiles.example.json's `profiles` array
-// (CLAUDE.md's verified facts): a name, a 32-hex-char secret, and the
-// shared MTProxy backend/carrier_mode every profile in this deployment
-// uses.
+// Profile mirrors one entry of profiles.json.
 type Profile struct {
 	Name        string `json:"name"`
 	Secret      string `json:"secret"`
@@ -29,16 +18,35 @@ type Profile struct {
 	CarrierMode string `json:"carrier_mode"`
 }
 
-// ProfilesFile mirrors the top-level shape of profiles.json:
-// {"profiles": [...]}.
+// ProfilesFile mirrors the top-level shape: {"profiles": [...]}.
 type ProfilesFile struct {
 	Profiles []Profile `json:"profiles"`
 }
 
-// AddProfile appends p to pf, rejecting a collision on either Name or
-// Secret so a bug upstream (duplicate telegram_id, secret reuse) fails
-// loudly here instead of silently producing a profiles.json two users
-// share.
+// Validate checks JSON-level invariants: non-empty fields and unique name/secret.
+func (pf *ProfilesFile) Validate() error {
+	names := make(map[string]struct{}, len(pf.Profiles))
+	secrets := make(map[string]string, len(pf.Profiles))
+	for _, p := range pf.Profiles {
+		if p.Name == "" {
+			return fmt.Errorf("applier: profile missing name")
+		}
+		if p.Secret == "" {
+			return fmt.Errorf("applier: profile %q missing secret", p.Name)
+		}
+		if _, ok := names[p.Name]; ok {
+			return fmt.Errorf("applier: duplicate profile name %q", p.Name)
+		}
+		if prev, ok := secrets[p.Secret]; ok {
+			return fmt.Errorf("applier: secret for profile %q collides with existing profile %q", p.Name, prev)
+		}
+		names[p.Name] = struct{}{}
+		secrets[p.Secret] = p.Name
+	}
+	return nil
+}
+
+// AddProfile appends p, rejecting collisions on name or secret.
 func (pf *ProfilesFile) AddProfile(p Profile) error {
 	for _, existing := range pf.Profiles {
 		if existing.Name == p.Name {
@@ -52,8 +60,7 @@ func (pf *ProfilesFile) AddProfile(p Profile) error {
 	return nil
 }
 
-// RemoveProfile deletes the profile named name, returning an error rather
-// than silently no-op-ing if it isn't present.
+// RemoveProfile deletes the profile named name.
 func (pf *ProfilesFile) RemoveProfile(name string) error {
 	for i, p := range pf.Profiles {
 		if p.Name == name {
@@ -62,4 +69,57 @@ func (pf *ProfilesFile) RemoveProfile(name string) error {
 		}
 	}
 	return fmt.Errorf("applier: profile name %q not found", name)
+}
+
+// ReadProfiles loads and validates profiles.json from path.
+func ReadProfiles(path string) (*ProfilesFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("applier: read profiles: %w", err)
+	}
+	var pf ProfilesFile
+	if err := json.Unmarshal(data, &pf); err != nil {
+		return nil, fmt.Errorf("applier: parse profiles JSON: %w", err)
+	}
+	if err := pf.Validate(); err != nil {
+		return nil, err
+	}
+	return &pf, nil
+}
+
+// WriteProfiles atomically writes pf to path after validation.
+func WriteProfiles(path string, pf *ProfilesFile) error {
+	if err := pf.Validate(); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(pf, "", "  ")
+	if err != nil {
+		return fmt.Errorf("applier: marshal profiles: %w", err)
+	}
+	data = append(data, '\n')
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("applier: create profiles dir: %w", err)
+	}
+
+	tmp, err := os.CreateTemp(dir, ".profiles-*.tmp")
+	if err != nil {
+		return fmt.Errorf("applier: create temp profiles file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("applier: write temp profiles file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("applier: close temp profiles file: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("applier: install profiles file: %w", err)
+	}
+	return nil
 }

@@ -5,13 +5,8 @@ import (
 	"time"
 )
 
-// Default LoginLimiter parameters (plan.md §5: "Базовый rate-limit на
-// попытки логина"). No specific numbers are mandated, so these are picked
-// to absorb typos by the legitimate admin without giving a brute-forcer a
-// meaningful number of guesses: 5 failures opens a 15-minute lockout, and
-// the failure count itself only accumulates within a 5-minute window (a
-// slow trickle of failed attempts, one every few minutes, never locks
-// anyone out).
+// Default login rate limiter parameters (plan.md §5, ARCHITECTURE.md):
+// 5 failed attempts within a short window trigger a 15-minute lockout.
 const (
 	DefaultMaxAttempts = 5
 	DefaultWindow      = 5 * time.Minute

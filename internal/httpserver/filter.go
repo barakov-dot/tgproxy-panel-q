@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
 )
 
 // SortColumn identifies a user-list column sortable via ?sort=.

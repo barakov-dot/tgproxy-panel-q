@@ -16,16 +16,8 @@
 - Пользователи с их секретами живут в `/etc/tproxy-server/profiles.json` — список профилей вида:
 
   ```json
-  {
-    "profiles": [
-      {
-        "name": "user_123456789",
-        "secret": "0123456789abcdef0123456789abcdef",
-        "backend": "127.0.0.1:2398",
-        "carrier_mode": "https"
-      }
-    ]
-  }
+  {"profiles":[{"name":"user_123456789","secret":"0123456789abcdef0123456789abcdef","backend":"127.0.0.1:2398"}]}
+
   ```
 
   Один и тот же `backend` (127.0.0.1:2398, официальный MTProxy) можно шарить между всеми
@@ -72,7 +64,7 @@ tgproxy-panel (один Go-бинарник, systemd-сервис):
 - **Язык:** Go (единообразно с самим tproxy-server, один статический бинарник, без Docker).
 - **БД:** SQLite (`modernc.org/sqlite` — чистый Go, без cgo, проще собирать/переносить).
 - **Telegram-бот:** long polling, библиотека — `go-telegram-bot-api/telegram-bot-api` или
-  `mymmrac/telego` (на усмотрение Claude Code, любая с поддержкой inline-кнопок).
+  `mymmrac/telego` (на усмотрение Composer, любая с поддержкой inline-кнопок).
 - **HTTP-роутинг:** `net/http` + `chi` (лёгкий, без лишних зависимостей).
 - **Фронтенд панели:** без Node/npm-сборки — Go-шаблоны (`html/template`) + htmx +
   Tailwind (через CDN или один vendored css-файл) для SPA-подобного поведения без билд-пайплайна.
@@ -171,7 +163,7 @@ CREATE TABLE settings (
 3. Хранить только последние **100** бэкапов (при превышении — удалять старые по времени).
 4. Добавить/удалить профиль, провалидировать итоговый JSON (валидный JSON + уникальность
    `name`/`secret`).
-5. Атомарно записать новый файл (temp-файл + rename), выставить владельца/права как у оригинала
+5. Дописать в файл, не удаляя предыдущий, выставить владельца/права как у оригинала
    (`0400`, тот же владелец).
 6. `systemctl restart tproxy-server`, дождаться `active` статуса (проверить через
    `systemctl is-active`, и опционально `curl 127.0.0.1:8081/readyz`).
@@ -299,7 +291,7 @@ BACKUP_KEEP=100
 ## 12. Репозиторий и дистрибуция
 
 Проект публикуется как публичный репозиторий:
-**https://github.com/barakov-dot/tgproxy-panel**
+**https://github.com/barakov-dot/tgproxy-panel-q**
 
 Установка на целевой сервер должна происходить так же, как у самого tproxy-server —
 `git clone`/`curl` + запуск `install.sh` из репозитория, без ручной сборки на сервере
@@ -318,8 +310,8 @@ BACKUP_KEEP=100
 - `install.sh` в репозитории должен сам клонировать/обновлять код (или скачивать релизный
   бинарник) — то есть пользователь на сервере выполняет условно:
   ```bash
-  git clone https://github.com/barakov-dot/tgproxy-panel.git
-  cd tgproxy-panel
+  git clone https://github.com/barakov-dot/tgproxy-panel-q.git
+  cd tgproxy-panel-q
   sudo ./deploy/install.sh
   ```
   либо однострочник через `curl | bash` (если решите делать такой вариант — предупредить в
@@ -332,7 +324,7 @@ BACKUP_KEEP=100
 - Разработка ведётся на macOS, эксплуатация — на Linux x86_64. Go отлично кросс-компилируется,
   специальных ухищрений не требуется, но нужно явно задавать таргет при сборке:
   ```bash
-  GOOS=linux GOARCH=amd64 go build -trimpath -o tgproxy-panel ./cmd/tgproxy-panel
+  GOOS=linux GOARCH=amd64 go build -trimpath -o tgproxy-panel-q ./cmd/tgproxy-panel-q
   ```
 - БД-драйвер должен быть чистым Go без cgo (`modernc.org/sqlite`, а не `mattn/go-sqlite3`) —
   иначе кросс-компиляция с Mac на Linux потребует cgo-тулчейн/докер для линковки под нужную
@@ -359,5 +351,6 @@ BACKUP_KEEP=100
 | Расположение панели | тот же домен, путь = случайные 20 символов, дальше проксируется на :9000 |
 | Защита панели | логин/пароль в `.env`, без доп. IP-ограничений/2FA |
 | Бэкапы | с таймштампом перед каждым изменением, ротация — последние 100 |
-| Репозиторий | публичный, https://github.com/barakov-dot/tgproxy-panel, установка через `install.sh` из репо |
+| Репозиторий | публичный, https://github.com/barakov-dot/tgproxy-panel-q, установка через `install.sh` из репо |
 | Разработка/эксплуатация | пишем на macOS, деплой на Debian 13 / Ubuntu 24 (linux/amd64) — сборка без cgo, кросс-компиляция или CI-релиз |
+| Отзыв прокси | при отзыве удаляем из profiles строку с прокси

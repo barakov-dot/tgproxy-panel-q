@@ -3,17 +3,18 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/applier"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
-	"github.com/barakov-dot/tgproxy-panel/internal/store"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/applier"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/config"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/store"
 )
 
-// fakeStore is an in-memory Store for tests, avoiding a real SQLite file
-// for anything that doesn't specifically want one. Combines what the
-// pre-consolidation internal/httpserver and internal/bot fakes each needed.
 type fakeStore struct {
 	mu       sync.Mutex
 	nextID   int64
@@ -22,8 +23,8 @@ type fakeStore struct {
 	audit    []models.AuditLog
 
 	createErr     error
-	issueErr      error
-	denyErr       error
+	setProfileErr error
+	updateErr     error
 	getSettingErr error
 }
 
@@ -82,7 +83,83 @@ func (f *fakeStore) CreateUser(_ context.Context, telegramID int64, username, fi
 	return &cp, nil
 }
 
-func (f *fakeStore) ListUsers(_ context.Context) ([]*models.User, error) {
+func (f *fakeStore) SetUserProfile(_ context.Context, id int64, profileName, secret string, setActive bool) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.setProfileErr != nil {
+		return nil, f.setProfileErr
+	}
+	var u *models.User
+	for _, candidate := range f.users {
+		if candidate.ID == id {
+			u = candidate
+			break
+		}
+	}
+	if u == nil {
+		return nil, store.ErrNotFound
+	}
+	u.ProfileName = &profileName
+	u.Secret = &secret
+	if setActive {
+		now := time.Now()
+		u.Status = models.StatusActive
+		u.IssuedAt = &now
+	}
+	cp := *u
+	return &cp, nil
+}
+
+func (f *fakeStore) UpdateUserStatus(_ context.Context, id int64, status models.UserStatus) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return nil, f.updateErr
+	}
+	var u *models.User
+	for _, candidate := range f.users {
+		if candidate.ID == id {
+			u = candidate
+			break
+		}
+	}
+	if u == nil {
+		return nil, store.ErrNotFound
+	}
+	now := time.Now()
+	u.Status = status
+	switch status {
+	case models.StatusPending:
+		u.RequestedAt = &now
+	case models.StatusRevoked:
+		u.ProfileName = nil
+		u.Secret = nil
+		u.RevokedAt = &now
+	}
+	cp := *u
+	return &cp, nil
+}
+
+func (f *fakeStore) ClearUserProfile(_ context.Context, id int64) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var u *models.User
+	for _, candidate := range f.users {
+		if candidate.ID == id {
+			u = candidate
+			break
+		}
+	}
+	if u == nil {
+		return nil, store.ErrNotFound
+	}
+	u.ProfileName = nil
+	u.Secret = nil
+	cp := *u
+	return &cp, nil
+}
+
+func (f *fakeStore) ListUsers(_ context.Context, filter store.UserListFilter, sort store.UserListSort) ([]*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]*models.User, 0, len(f.users))
@@ -90,71 +167,84 @@ func (f *fakeStore) ListUsers(_ context.Context) ([]*models.User, error) {
 		cp := *u
 		out = append(out, &cp)
 	}
+	if filter.Status != nil {
+		filtered := out[:0]
+		for _, u := range out {
+			if u.Status == *filter.Status {
+				filtered = append(filtered, u)
+			}
+		}
+		out = filtered
+	}
+	if q := strings.TrimSpace(filter.Query); q != "" {
+		lq := strings.ToLower(q)
+		filtered := out[:0]
+		for _, u := range out {
+			if userMatchesQuery(u, lq) {
+				filtered = append(filtered, u)
+			}
+		}
+		out = filtered
+	}
+	sortUsersSlice(out, sort)
 	return out, nil
 }
 
-func (f *fakeStore) IssueUser(_ context.Context, telegramID int64, profileName, secret string) (*models.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.issueErr != nil {
-		return nil, f.issueErr
+func userMatchesQuery(u *models.User, lowerQuery string) bool {
+	fields := []string{
+		strconv.FormatInt(u.TelegramID, 10),
+		string(u.Status),
+		u.DisplayName(),
 	}
-	u, ok := f.users[telegramID]
-	if !ok {
-		return nil, store.ErrNotFound
+	if u.Username != nil {
+		fields = append(fields, *u.Username)
 	}
-	now := time.Now()
-	u.ProfileName = &profileName
-	u.Secret = &secret
-	u.Status = models.StatusActive
-	u.IssuedAt = &now
-	cp := *u
-	return &cp, nil
+	for _, f := range fields {
+		if strings.Contains(strings.ToLower(f), lowerQuery) {
+			return true
+		}
+	}
+	return false
 }
 
-func (f *fakeStore) RevokeUser(_ context.Context, telegramID int64) (*models.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	u, ok := f.users[telegramID]
-	if !ok {
-		return nil, store.ErrNotFound
+func sortUsersSlice(users []*models.User, order store.UserListSort) {
+	col := order.Column
+	if col == "" {
+		col = "requested_at"
 	}
-	now := time.Now()
-	u.ProfileName = nil
-	u.Secret = nil
-	u.Status = models.StatusRevoked
-	u.RevokedAt = &now
-	cp := *u
-	return &cp, nil
+	sort.SliceStable(users, func(i, j int) bool {
+		a, b := users[i], users[j]
+		var less bool
+		switch col {
+		case "telegram_id":
+			less = a.TelegramID < b.TelegramID
+		case "username":
+			less = strings.ToLower(a.DisplayName()) < strings.ToLower(b.DisplayName())
+		case "status":
+			less = a.Status < b.Status
+		case "issued_at":
+			less = timeLess(a.IssuedAt, b.IssuedAt)
+		default:
+			less = timeLess(a.RequestedAt, b.RequestedAt)
+		}
+		if order.Desc {
+			return !less
+		}
+		return less
+	})
 }
 
-func (f *fakeStore) DenyUser(_ context.Context, telegramID int64) (*models.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.denyErr != nil {
-		return nil, f.denyErr
+func timeLess(a, b *time.Time) bool {
+	if a == nil && b == nil {
+		return false
 	}
-	u, ok := f.users[telegramID]
-	if !ok {
-		return nil, store.ErrNotFound
+	if a == nil {
+		return true
 	}
-	u.Status = models.StatusDenied
-	cp := *u
-	return &cp, nil
-}
-
-func (f *fakeStore) SetPending(_ context.Context, telegramID int64) (*models.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	u, ok := f.users[telegramID]
-	if !ok {
-		return nil, store.ErrNotFound
+	if b == nil {
+		return false
 	}
-	now := time.Now()
-	u.Status = models.StatusPending
-	u.RequestedAt = &now
-	cp := *u
-	return &cp, nil
+	return a.Before(*b)
 }
 
 func (f *fakeStore) GetSetting(_ context.Context, key string) (string, bool, error) {
@@ -174,15 +264,13 @@ func (f *fakeStore) SetSetting(_ context.Context, key, value string) error {
 	return nil
 }
 
-func (f *fakeStore) WriteAuditLog(_ context.Context, entry models.AuditLog) error {
+func (f *fakeStore) AppendAuditLog(_ context.Context, entry models.AuditLog) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.audit = append(f.audit, entry)
 	return nil
 }
 
-// fakeApplier is an in-memory Applier for tests. Set IssueErr/RevokeErr to
-// force a failure path.
 type fakeApplier struct {
 	mu          sync.Mutex
 	IssueErr    error
@@ -219,14 +307,79 @@ func (f *fakeApplier) RevokeProfile(_ context.Context, telegramID int64) (*appli
 	return &applier.Result{ProfileCount: 0}, nil
 }
 
+type fakeBotSender struct {
+	mu    sync.Mutex
+	calls []botCall
+	err   error
+}
+
+type botCall struct {
+	TelegramID int64
+	Link       string
+}
+
+func (f *fakeBotSender) SendProxyLink(_ context.Context, telegramID int64, link string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, botCall{telegramID, link})
+	return f.err
+}
+
 var errForced = fmt.Errorf("forced test error")
 
-func testActions(st *fakeStore, ap *fakeApplier, defaultAutoIssue bool) *Actions {
-	return &Actions{
-		Store:            st,
-		Applier:          ap,
-		DefaultAutoIssue: defaultAutoIssue,
-		GenSecret:        func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil },
-		ProfileName:      func(id int64) string { return fmt.Sprintf("user_%d", id) },
+func testConfig() *config.Config {
+	return &config.Config{
+		TproxyHostname: "proxy.example.com",
+		AutoIssue:      false,
 	}
+}
+
+func testService(st *fakeStore, ap *fakeApplier, bot BotSender, defaultAutoIssue bool) *Service {
+	cfg := testConfig()
+	cfg.AutoIssue = defaultAutoIssue
+	return &Service{
+		cfg:     cfg,
+		store:   st,
+		applier: ap,
+		bot:     bot,
+		GenSecret:   func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil },
+		ProfileName: func(id int64) string { return fmt.Sprintf("user_%d", id) },
+	}
+}
+
+func userIDByTelegram(st *fakeStore, telegramID int64) int64 {
+	u, _ := st.GetUserByTelegramID(context.Background(), telegramID)
+	return u.ID
+}
+
+func hasAuditAction(st *fakeStore, action string) bool {
+	for _, e := range st.audit {
+		if e.Action == action {
+			return true
+		}
+	}
+	return false
+}
+
+func auditHasSecret(st *fakeStore) bool {
+	secret := "deadbeefdeadbeefdeadbeefdeadbeef"
+	for _, e := range st.audit {
+		if containsSecret(e.Detail, secret) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSecret(s, secret string) bool {
+	return s != "" && (len(s) >= len(secret) && findSubstring(s, secret))
+}
+
+func findSubstring(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
 }

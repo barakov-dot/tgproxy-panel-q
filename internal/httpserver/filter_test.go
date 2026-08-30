@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel-q/internal/models"
 )
 
 func ptr[T any](v T) *T { return &v }
