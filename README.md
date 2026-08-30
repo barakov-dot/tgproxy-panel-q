@@ -188,3 +188,7 @@ changing:
   write, not just inherited from a temp file.
 - Every `profiles.json` change is backed up with a UTC timestamp before being applied; the
   newest 100 backups are kept.
+
+## License
+
+[MIT](LICENSE)
