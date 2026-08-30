@@ -33,6 +33,16 @@ a real target host, but do not silently assume they've changed.
 - `/etc/tproxy-server/` itself is `root:tproxy 0750`; `config.json` is `root:tproxy 0640`.
   Our apply script must re-assert `chown root:tproxy` + `chmod 0400` on `profiles.json`
   after every write (a plain temp-file+rename can silently inherit the temp file's mode).
+- **`internal/applier`'s own pre-flight `-check` call (before it ever hands off to sudo
+  apply-profiles.sh) runs as the unprivileged `tgproxy-panel` process and needs to *read*
+  `config.json`** for that — confirmed against a real install: without `tgproxy-panel` in
+  `config.json`'s owning group (normally `tproxy`), this fails with "permission denied"
+  and every issue/approve breaks, even though apply-profiles.sh's own root-context
+  validation would have been fine. `deploy/install.sh` handles this by adding
+  `tgproxy-panel` to that group when creating the user. This grants read access to a
+  secrets-free settings file only — it does not and must not grant any access to the real
+  `profiles.json` (`0400`, no group bits at all), which the panel process still never
+  reads directly (see the declarative, DB-is-source-of-truth design below).
 - **The tproxy-server binary validates its own config+profiles**: `tproxy-server -config
   /etc/tproxy-server/config.json -profiles-file /etc/tproxy-server/profiles.json -check`.
   Shell out to this instead of hand-rolling profile-schema validation — it's the actual

@@ -468,6 +468,29 @@ if ! id tgproxy-panel >/dev/null 2>&1; then
     useradd --system --no-create-home --shell /usr/sbin/nologin -g tgproxy-panel tgproxy-panel
 fi
 
+# internal/applier shells out to `tproxy-server -config ... -check` as this
+# unprivileged process itself — a fail-fast validation of the candidate
+# profiles.json *before* ever invoking sudo apply-profiles.sh. That needs
+# read access to config.json, which tproxy-server's own installer leaves at
+# root:tproxy 0640. Add tgproxy-panel to config.json's actual owning group
+# (normally "tproxy") so that read succeeds. This grants nothing beyond
+# read access to a secrets-free settings file (public_hostname/limits/
+# timeouts) — it does NOT grant any access to profiles.json (0400, no
+# group bits at all), which the panel process still cannot and must not
+# read directly (see CLAUDE.md's "Verified facts" / internal/applier's
+# declarative, DB-is-source-of-truth design). Confirmed against a real
+# install: without this, every issue/approve fails with "permission
+# denied" opening config.json, even though apply-profiles.sh's own
+# root-context validation would have succeeded fine.
+if [ -e "$config_path" ]; then
+    config_group="$(stat -c '%G' "$config_path" 2>/dev/null || true)"
+    if [ -n "$config_group" ] && getent group "$config_group" >/dev/null 2>&1; then
+        usermod -aG "$config_group" tgproxy-panel
+    else
+        echo "Warning: could not determine/verify the group owning $config_path; tgproxy-panel may not be able to read it, which would make the panel's own pre-flight profile validation fail with a permission error (deploy/apply-profiles.sh's own root-context validation is unaffected)." >&2
+    fi
+fi
+
 install -d -m 0700 -o tgproxy-panel -g tgproxy-panel "$install_dir/data"
 chown tgproxy-panel:tgproxy-panel "$install_dir/backup"
 chmod 0700 "$install_dir/backup"
@@ -592,8 +615,15 @@ install -m 0644 -o root -g root "$service_tmp" /etc/systemd/system/tgproxy-panel
 systemctl daemon-reload
 
 # --- 18. Enable and start ---
-
-systemctl enable --now tgproxy-panel
+#
+# Explicit enable + restart, not `enable --now`: on a re-run against an
+# already-active service, `enable --now` only calls the equivalent of
+# `systemctl start`, which is a no-op on a unit that's already running — so
+# a re-run meant to pick up a new binary, .env, or (see above) group
+# membership would silently keep running the OLD process state. `restart`
+# is safe unconditionally (starts it if stopped, restarts it if running).
+systemctl enable tgproxy-panel
+systemctl restart tgproxy-panel
 
 active=0
 for _ in 1 2 3 4 5 6 7 8 9 10; do
