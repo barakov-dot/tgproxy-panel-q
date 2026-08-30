@@ -9,8 +9,8 @@ import (
 )
 
 // desiredProfiles builds the panel-managed slice of profiles.json (active DB
-// users only). internal/applier merges this with the live profiles.json via
-// MergePanelProfiles before staging the candidate for apply-profiles.sh.
+// users only). deploy/apply-profiles.sh merges this with the live profiles.json
+// as root (see MergePanelProfiles in profiles.go) before installing the file.
 func desiredProfiles(ctx context.Context, s userLister, cfg *config.Config) (*ProfilesFile, error) {
 	users, err := s.ListUsers(ctx)
 	if err != nil {

@@ -130,18 +130,18 @@ tgproxy-panel ALL=(root) NOPASSWD: /opt/tgproxy-panel/bin/apply-profiles.sh
 `apply-profiles.sh` (root-owned, 0755):
 
 1. Validate candidate JSON path argument
-2. `tproxy-server -check` on candidate (already merged in Go — see below)
-3. Verify profile backend ports are listening
-4. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
-5. Rotate backups (keep last `BACKUP_KEEP`)
-6. Atomic install to `$TPROXY_PROFILES_PATH` with correct owner/mode
-7. `systemctl restart tproxy-server`
-8. Sync MTProxy secrets from live `$TPROXY_PROFILES_PATH` → `/etc/mtproxy/mtproxy.secrets`; restart `mtproxy` if changed
-9. Exit non-zero if restart fails
+2. Merge panel-managed profiles from candidate with live profiles.json (keeps `default`, etc.)
+3. `tproxy-server -check` on merged profiles
+4. Verify profile backend ports are listening
+5. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
+6. Rotate backups (keep last `BACKUP_KEEP`)
+7. Atomic install to `$TPROXY_PROFILES_PATH` with correct owner/mode
+8. `systemctl restart tproxy-server`
+9. Sync MTProxy secrets from live `$TPROXY_PROFILES_PATH` → `/etc/mtproxy/mtproxy.secrets`; restart `mtproxy` if changed
+10. Exit non-zero if restart fails
 
-Go `internal/applier` merges active DB users with the live profiles.json
-(`MergePanelProfiles`), writes the candidate, then invokes
-`sudo $APPLY_PROFILES_SCRIPT <path>`.
+Go `internal/applier` stages a panel-only candidate; merge runs as root in this script
+(mirror of `MergePanelProfiles` in profiles.go).
 
 Optional `RUN_AS_ROOT=1` env bypasses sudo for dev/simplified installs.
 

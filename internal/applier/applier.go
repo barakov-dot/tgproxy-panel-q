@@ -103,17 +103,7 @@ func (a *Applier) apply(ctx context.Context) (*Result, error) {
 		return nil, err
 	}
 
-	currentPF, err := a.readLiveProfiles()
-	if err != nil {
-		return nil, err
-	}
-
-	mergedPF, err := MergePanelProfiles(currentPF, panelPF)
-	if err != nil {
-		return nil, fmt.Errorf("applier: merge profiles: %w", err)
-	}
-
-	candidatePath, err := writeCandidate(a.cfg.BackupDir, mergedPF, a.cfg.BackupKeep)
+	candidatePath, err := writeCandidate(a.cfg.BackupDir, panelPF, a.cfg.BackupKeep)
 	if err != nil {
 		return nil, err
 	}
@@ -153,25 +143,14 @@ func (a *Applier) apply(ctx context.Context) (*Result, error) {
 	}, nil
 }
 
-func (a *Applier) readLiveProfiles() (*ProfilesFile, error) {
-	pf, err := ReadProfiles(a.cfg.TproxyProfilesPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("applier: read live profiles: %w", err)
-	}
-	return pf, nil
-}
-
 func (a *Applier) validateCandidate(ctx context.Context, candidatePath string) error {
 	pf, err := ReadProfiles(candidatePath)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrValidationFailed, err)
 	}
 
-	// Merged candidates may be empty when no upstream and no active panel profiles
-	// remain; apply-profiles.sh still runs tproxy-server -check authoritatively.
+	// Panel-only candidates may be empty after revoke; apply-profiles.sh merges
+	// them with non-panel profiles (e.g. upstream "default") as root before -check.
 	if len(pf.Profiles) == 0 {
 		return nil
 	}
