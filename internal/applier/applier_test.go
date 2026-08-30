@@ -312,7 +312,11 @@ func TestRevokeProfile_Success(t *testing.T) {
 
 	runner := &fakeRunner{}
 	dir := t.TempDir()
-	if err := WriteProfiles(filepath.Join(dir, "profiles.json"), &ProfilesFile{}); err != nil {
+	live := &ProfilesFile{Profiles: []Profile{
+		{Name: "default", Secret: "000102030405060708090a0b0c0d0e0f", Backend: "127.0.0.1:2398", CarrierMode: "https"},
+		{Name: "user_666", Secret: "dddddddddddddddddddddddddddddddd", Backend: "127.0.0.1:2398", CarrierMode: "https"},
+	}}
+	if err := WriteProfiles(filepath.Join(dir, "profiles.json"), live); err != nil {
 		t.Fatal(err)
 	}
 	a := newTestApplier(t, Store{s}, readyServer(t), runner, dir)
@@ -323,6 +327,21 @@ func TestRevokeProfile_Success(t *testing.T) {
 	}
 	if res.ProfileCount != 0 {
 		t.Errorf("ProfileCount = %d, want 0", res.ProfileCount)
+	}
+	if len(runner.applyCalls) != 1 {
+		t.Fatalf("apply calls = %d, want 1", len(runner.applyCalls))
+	}
+	got, err := ReadProfiles(runner.applyCalls[0][1])
+	if err != nil {
+		t.Fatalf("ReadProfiles(candidate): %v", err)
+	}
+	for _, p := range got.Profiles {
+		if p.Name == "user_666" {
+			t.Fatalf("candidate still contains revoked profile %q: %+v", p.Name, got.Profiles)
+		}
+	}
+	if len(got.Profiles) != 1 || got.Profiles[0].Name != "default" {
+		t.Fatalf("candidate = %+v, want default only", got.Profiles)
 	}
 }
 

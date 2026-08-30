@@ -22,28 +22,25 @@
 #   1. Validate invocation (exactly one arg, existing regular file, no
 #      path-traversal tricks).
 #   2. Cheap structural JSON pre-filter (best-effort, not authoritative).
-#   3. Merge candidate with the live profiles.json: keep every profile whose
-#      name is NOT panel-managed (user_<telegram_id>), replace all panel-managed
-#      entries with the candidate list. This preserves pre-existing profiles
-#      such as "default" that tproxy-server shipped with.
-#   4. Authoritative validation: `tproxy-server -check` on the merged file
-#      (not the panel-only candidate — it may be empty after revoke).
-#   5. Verify every profile backend port is listening on loopback.
-#   6. Backup the current live profiles.json (skip if this is the first
+#   3. Authoritative validation: `tproxy-server -check` on the candidate. The
+#      panel merges live profiles.json with active DB users in Go before
+#      staging the candidate (see internal/applier MergePanelProfiles).
+#   4. Verify every profile backend port is listening on loopback.
+#   5. Backup the current live profiles.json (skip if this is the first
 #      ever run and none exists yet).
-#   7. Rotate backups, keeping only the newest BACKUP_KEEP.
-#   8. Atomically install the merged candidate as the new profiles.json
+#   6. Rotate backups, keeping only the newest BACKUP_KEEP.
+#   7. Atomically install the candidate as the new profiles.json
 #      (temp file in the same directory + chown root:tproxy + chmod 0400 +
 #      rename).
-#   9. systemctl restart the tproxy-server service. If systemctl itself
+#   8. systemctl restart the tproxy-server service. If systemctl itself
 #      rejects the restart request, best-effort restore the backup taken
-#      in step 6 before exiting non-zero, so the live file is left as
+#      in step 5 before exiting non-zero, so the live file is left as
 #      close as possible to how it was found.
-#  10. Sync MTProxy `-S` secrets from the live profiles.json →
+#   9. Sync MTProxy `-S` secrets from the live profiles.json →
 #      /etc/mtproxy/mtproxy.secrets (one per line); restart mtproxy when
 #      the secret set changed. Runs only after profiles.json is installed
 #      and tproxy-server restart succeeded, so revoke/issue always match.
-#  11. Print a one-line, secret-free summary on every exit path.
+#  10. Print a one-line, secret-free summary on every exit path.
 #
 # This script deliberately does NOT poll /readyz — internal/applier
 # (applier.go's apply()) does that itself after this script returns 0.
@@ -120,12 +117,10 @@ readonly PROG="apply-profiles.sh"
 # Temp files created along the way, cleaned up on every exit path.
 tmp_install=""
 tmp_restore=""
-tmp_merged=""
 # shellcheck disable=SC2329  # invoked indirectly via `trap ... EXIT` below
 cleanup() {
     [ -n "$tmp_install" ] && rm -f "$tmp_install"
     [ -n "$tmp_restore" ] && rm -f "$tmp_restore"
-    [ -n "$tmp_merged" ] && rm -f "$tmp_merged"
     # Without this, `set -e` turns the false result of a no-op `[ -n "" ] &&
     # ...` above (the common case: nothing left to clean up) into this
     # function's return status, which — because it runs via `trap ... EXIT`
@@ -202,90 +197,15 @@ else
     info "no python3/jq available, skipping structural pre-filter (relying on -check)"
 fi
 
-# --- 3. Merge panel candidate with existing non-panel profiles ---
-
-merged_tmp="$(mktemp "${BACKUP_DIR}/.profiles.merged.XXXXXX")"
-tmp_merged="$merged_tmp"
-
-merge_profiles() {
-    local current_path="$1" candidate_path="$2" out_path="$3"
-    if command -v python3 >/dev/null 2>&1; then
-        python3 - "$current_path" "$candidate_path" "$out_path" <<'PY'
-import json, re, sys
-
-current_path, candidate_path, out_path = sys.argv[1:4]
-panel_name = re.compile(r"^user_\d+$")
-
-candidate = json.load(open(candidate_path, encoding="utf-8"))
-current = {"profiles": []}
-if current_path and current_path != "-":
-    try:
-        with open(current_path, encoding="utf-8") as f:
-            current = json.load(f)
-    except FileNotFoundError:
-        pass
-
-foreign = [p for p in current.get("profiles", []) if not panel_name.match(p.get("name", ""))]
-template = foreign[0] if foreign else None
-panel_profiles = []
-for p in candidate.get("profiles", []):
-    synced = dict(p)
-    if template:
-        backend = template.get("backend")
-        if backend:
-            synced["backend"] = backend
-        carrier = template.get("carrier_mode") or "https"
-        synced["carrier_mode"] = carrier
-    panel_profiles.append(synced)
-merged = {"profiles": foreign + panel_profiles}
-
-names, secrets = set(), set()
-for p in merged["profiles"]:
-    name = p.get("name", "")
-    secret = p.get("secret", "")
-    if not name or not secret:
-        print(f"{name!r}: profile missing name or secret", file=sys.stderr)
-        sys.exit(1)
-    if name in names:
-        print(f"duplicate profile name {name!r}", file=sys.stderr)
-        sys.exit(1)
-    if secret in secrets:
-        print(f"duplicate secret for profile {name!r}", file=sys.stderr)
-        sys.exit(1)
-    names.add(name)
-    secrets.add(secret)
-
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(merged, f, indent=2)
-    f.write("\n")
-PY
-        return $?
-    fi
-    die "python3 is required to merge panel profiles with existing profiles.json (preserves non-panel entries like \"default\")"
-}
-
-current_for_merge="-"
-if [ -e "$TPROXY_PROFILES_PATH" ]; then
-    current_for_merge="$TPROXY_PROFILES_PATH"
-fi
-
-panel_candidate="$candidate"
-
-if ! merge_profiles "$current_for_merge" "$candidate" "$merged_tmp"; then
-    die "failed to merge candidate with existing profiles.json"
-fi
-candidate="$merged_tmp"
-info "merged panel candidate with existing non-panel profiles ($(wc -c < "$candidate") bytes)"
-
-# --- 4. Authoritative validation via tproxy-server's own parser (merged) ---
+# --- 3. Authoritative validation via tproxy-server's own parser ---
 
 if ! check_stderr="$("$TPROXY_SERVER_BIN" -config "$TPROXY_CONFIG_PATH" -profiles-file "$candidate" -check 2>&1 >/dev/null)"; then
     echo "$check_stderr" >&2
-    die "merged profiles failed tproxy-server -check validation"
+    die "candidate failed tproxy-server -check validation"
 fi
-info "tproxy-server -check passed on merged profiles"
+info "tproxy-server -check passed"
 
-# --- 5. Verify MTProxy backend port is listening ---
+# --- 4. Verify MTProxy backend port is listening ---
 
 if command -v ss >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     while IFS= read -r backend; do
@@ -308,7 +228,7 @@ PY
     info "all profile backend ports are listening"
 fi
 
-# --- 6. Backup current live profiles.json ---
+# --- 5. Backup current live profiles.json ---
 
 mkdir -p "$BACKUP_DIR"
 chmod 0700 "$BACKUP_DIR"
@@ -333,7 +253,7 @@ else
     info "no existing profiles.json at $TPROXY_PROFILES_PATH, skipping backup (first run?)"
 fi
 
-# --- 7. Rotate backups, keep newest BACKUP_KEEP ---
+# --- 6. Rotate backups, keep newest BACKUP_KEEP ---
 
 if [ "$BACKUP_KEEP" -gt 0 ]; then
     # profiles.json.<timestamp>[.n].bak sorts lexically = chronologically
@@ -350,7 +270,7 @@ if [ "$BACKUP_KEEP" -gt 0 ]; then
     fi
 fi
 
-# --- 8. Atomic install of the candidate as the new profiles.json ---
+# --- 7. Atomic install of the candidate as the new profiles.json ---
 
 profiles_dir="$(dirname -- "$TPROXY_PROFILES_PATH")"
 mkdir -p "$profiles_dir"
@@ -371,34 +291,16 @@ profile_count="?"
 profile_names=""
 if command -v python3 >/dev/null 2>&1; then
     profile_count="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("profiles", [])))' "$TPROXY_PROFILES_PATH" 2>/dev/null || echo '?')"
-    profile_names="$(python3 - "$TPROXY_PROFILES_PATH" "$panel_candidate" <<'PY' 2>/dev/null || true
+    profile_names="$(python3 - "$TPROXY_PROFILES_PATH" <<'PY' 2>/dev/null || true
 import json, sys
-
-installed_path, panel_candidate_path = sys.argv[1:3]
-with open(installed_path, encoding="utf-8") as f:
-    installed = json.load(f)
-with open(panel_candidate_path, encoding="utf-8") as f:
-    panel = json.load(f)
-
-installed_names = {p.get("name") for p in installed.get("profiles", [])}
-missing = []
-for p in panel.get("profiles", []):
-    name = p.get("name")
-    if name and name not in installed_names:
-        missing.append(name)
-if missing:
-    print("MISSING:" + ",".join(missing))
-    sys.exit(1)
-print(",".join(sorted(n for n in installed_names if n)))
+names = sorted(p.get("name") for p in json.load(open(sys.argv[1], encoding="utf-8")).get("profiles", []) if p.get("name"))
+print(",".join(names))
 PY
 )"
-    if [[ "$profile_names" == MISSING:* ]]; then
-        die "installed profiles.json is missing panel profile(s): ${profile_names#MISSING:}"
-    fi
 fi
 info "installed new profiles.json ($profile_count profile(s)) at $TPROXY_PROFILES_PATH${profile_names:+, names: $profile_names}"
 
-# --- 9. Restart tproxy-server ---
+# --- 8. Restart tproxy-server ---
 
 if ! systemctl restart "$TPROXY_SERVICE_NAME"; then
     info "systemctl restart $TPROXY_SERVICE_NAME failed, attempting best-effort restore of previous profiles.json"
@@ -421,7 +323,7 @@ fi
 
 info "restarted $TPROXY_SERVICE_NAME successfully"
 
-# --- 10. Sync MTProxy secrets from live profiles.json (multi -S) ---
+# --- 9. Sync MTProxy secrets from live profiles.json (multi -S) ---
 
 sync_mtproxy_secrets() {
     local profiles_path="$1"

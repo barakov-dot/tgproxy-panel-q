@@ -130,17 +130,17 @@ tgproxy-panel ALL=(root) NOPASSWD: /opt/tgproxy-panel/bin/apply-profiles.sh
 `apply-profiles.sh` (root-owned, 0755):
 
 1. Validate candidate JSON path argument
-2. Merge candidate (panel-managed `user_<telegram_id>` profiles only) with the **live**
-   profiles.json: keep every non-panel profile unchanged (e.g. upstream `default`),
-   replace all panel-managed entries with the candidate list
-3. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
-4. Sync MTProxy secrets from live `$TPROXY_PROFILES_PATH` → `/etc/mtproxy/mtproxy.secrets` (one per line, each becomes `-S`); keep a single `MTPROXY_SECRET` in `mtproxy.env`; restart `mtproxy` if changed (after tproxy-server restart succeeds)
+2. `tproxy-server -check` on candidate (already merged in Go — see below)
+3. Verify profile backend ports are listening
+4. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
 5. Rotate backups (keep last `BACKUP_KEEP`)
 6. Atomic install to `$TPROXY_PROFILES_PATH` with correct owner/mode
 7. `systemctl restart tproxy-server`
-8. Exit non-zero if restart fails
+8. Sync MTProxy secrets from live `$TPROXY_PROFILES_PATH` → `/etc/mtproxy/mtproxy.secrets`; restart `mtproxy` if changed
+9. Exit non-zero if restart fails
 
-Go `internal/applier` writes candidate to temp file, invokes
+Go `internal/applier` merges active DB users with the live profiles.json
+(`MergePanelProfiles`), writes the candidate, then invokes
 `sudo $APPLY_PROFILES_SCRIPT <path>`.
 
 Optional `RUN_AS_ROOT=1` env bypasses sudo for dev/simplified installs.
