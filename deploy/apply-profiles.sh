@@ -419,7 +419,11 @@ PY
     fi
 
     install -d -m 0750 -o root -g mtproxy /etc/mtproxy
-    install -m 0440 -o root -g mtproxy "$env_tmp" "$MTPROXY_ENV_FILE"
+    # Atomic install in-place: plain `install` unlinks the target first, which
+    # fails under ProtectSystem=strict unless /etc/mtproxy is in ReadWritePaths.
+    env_live_tmp="${MTPROXY_ENV_FILE}.tmp.$$"
+    install -m 0440 -o root -g mtproxy "$env_tmp" "$env_live_tmp"
+    mv -f "$env_live_tmp" "$MTPROXY_ENV_FILE"
     rm -f "$secrets_tmp" "$env_tmp"
     info "updated $MTPROXY_ENV_FILE ($count secret(s))"
 

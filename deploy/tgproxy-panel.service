@@ -35,10 +35,12 @@ ProtectSystem=strict
 # apply-profiles.sh` child process stays in this unit's mount namespace even
 # after escalating to root (sudo changes UID/GID, not the mount namespace),
 # so without this it can't write the new profiles.json there either, even
-# as root. deploy/install.sh templates the real profiles.json directory in
-# here at install time; this default matches the standard /etc/tproxy-server
-# layout for anyone reading/using this file directly.
-ReadWritePaths=/opt/tgproxy-panel/data /opt/tgproxy-panel/backup /etc/tproxy-server
+# as root. /etc/mtproxy is also needed: apply-profiles.sh updates mtproxy.env
+# (MTPROXY_SECRETS) when panel profiles change. deploy/install.sh templates
+# the real profiles.json directory in here at install time; this default
+# matches the standard /etc/tproxy-server layout for anyone reading/using
+# this file directly.
+ReadWritePaths=/opt/tgproxy-panel/data /opt/tgproxy-panel/backup /etc/tproxy-server /etc/mtproxy
 ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true

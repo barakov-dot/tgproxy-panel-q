@@ -723,7 +723,7 @@ sed \
     -e "s|^WorkingDirectory=.*|WorkingDirectory=${install_dir}|" \
     -e "s|^EnvironmentFile=.*|EnvironmentFile=${install_dir}/.env|" \
     -e "s|^ExecStart=.*|ExecStart=${install_dir}/tgproxy-panel|" \
-    -e "s|^ReadWritePaths=.*|ReadWritePaths=${install_dir}/data ${install_dir}/backup ${profiles_dir}|" \
+    -e "s|^ReadWritePaths=.*|ReadWritePaths=${install_dir}/data ${install_dir}/backup ${profiles_dir} /etc/mtproxy|" \
     "$repo_root/deploy/tgproxy-panel.service" >"$service_tmp"
 install -m 0644 -o root -g root "$service_tmp" /etc/systemd/system/tgproxy-panel.service
 systemctl daemon-reload
