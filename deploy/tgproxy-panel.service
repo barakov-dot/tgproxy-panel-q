@@ -1,0 +1,65 @@
+[Unit]
+Description=tgproxy-panel (HTTP panel + Telegram bot for tproxy-server user management)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tgproxy-panel
+Group=tgproxy-panel
+WorkingDirectory=/opt/tgproxy-panel
+EnvironmentFile=/opt/tgproxy-panel/.env
+ExecStart=/opt/tgproxy-panel/tgproxy-panel
+Restart=on-failure
+RestartSec=2s
+
+# --- Hardening ---
+#
+# NOTE ON NoNewPrivileges: intentionally OMITTED (do not set it to true).
+# This service reaches privileged operations exclusively via
+# `sudo /opt/tgproxy-panel/bin/apply-profiles.sh <candidate>` (see
+# internal/applier and deploy/sudoers.tgproxy-panel). sudo's privilege
+# escalation relies on its setuid-root bit, and systemd's
+# NoNewPrivileges=true unconditionally blocks execve() from granting new
+# privileges (setuid/setgid/file capabilities included) for this process
+# and everything it forks — that would make every `sudo apply-profiles.sh`
+# call fail silently at the setuid step, breaking the entire
+# issue/revoke/apply pipeline this project exists to run. Getting this
+# wrong is an easy, quiet mistake (the unit still starts fine; only the
+# privileged apply step fails at runtime), so it is called out here
+# explicitly rather than merely left off the list below.
+ProtectSystem=strict
+# The panel needs to write its own SQLite DB, backups, and staged
+# candidate files under /opt/tgproxy-panel, which ProtectSystem=strict
+# otherwise makes read-only.
+ReadWritePaths=/opt/tgproxy-panel/data /opt/tgproxy-panel/backup
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=false
+# ^ RestrictSUIDSGID would block this process from creating setuid/setgid
+# files itself (it never does), but it does NOT affect *executing* an
+# existing setuid binary like /usr/bin/sudo — that's governed by
+# NoNewPrivileges above, not this. Left false to match "omit anything that
+# could plausibly interact with the sudo path" rather than relying on a
+# subtle distinction holding up under a future systemd version change.
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictNamespaces=true
+# Outbound network access is required: the Telegram bot uses long polling
+# against api.telegram.org (HTTPS), and the panel's own HTTP server needs
+# to accept inbound connections from Caddy on 127.0.0.1. Do NOT add
+# IPAddressDeny=any (that would break the bot's long polling) and do NOT
+# restrict AddressFamilies beyond IPv4/IPv6/Unix (AF_INET/AF_INET6/AF_UNIX)
+# — a narrower RestrictAddressFamilies would break outbound HTTPS to
+# Telegram's API.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

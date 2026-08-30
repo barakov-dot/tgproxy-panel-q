@@ -1,0 +1,44 @@
+# sudoers rule for tgproxy-panel (plan.md §7 "Права доступа").
+#
+# Install to: /etc/sudoers.d/tgproxy-panel
+# Mode:       0440
+# Owner:      root:root
+#
+# Before trusting this file, validate its syntax with:
+#   visudo -c -f /etc/sudoers.d/tgproxy-panel
+# (deploy/install.sh, a later stage, is expected to do this automatically
+# as part of installing it — never load an unvalidated sudoers fragment.)
+#
+# Grants the unprivileged `tgproxy-panel` system user NOPASSWD permission
+# to run exactly one script, apply-profiles.sh, as root — and only with an
+# argument that is a candidate file under
+# /opt/tgproxy-panel/backup/candidates/. This is deliberately narrow: no
+# other command, no arbitrary argument, no shell metacharacters (sudoers
+# command-line matching here is literal argument matching, not a shell
+# glob that would expand `*`, `..`, etc. — see `man 5 sudoers`,
+# "Command execution" / "Wildcards" sections). sudoers glob syntax
+# (fnmatch(3)-based) only supports simple `*`/`?`/`[...]` wildcards, not
+# `**` or full shell globbing; a single trailing `*` is sufficient here
+# because internal/applier/candidate.go always writes candidates as flat
+# files directly inside that one directory, never in a subdirectory.
+#
+# KNOWN CONSTRAINT: the path below is hardcoded to the default
+# BACKUP_DIR=/opt/tgproxy-panel/backup (see internal/config.Config.BackupDir
+# and .env.example). If a deployment's .env ever sets a non-default
+# BACKUP_DIR, this file no longer matches where internal/applier actually
+# stages candidates, and every apply will fail at the sudo step ("sorry,
+# you are not allowed"). deploy/install.sh (a later stage) must either:
+#   (a) keep BACKUP_DIR=/opt/tgproxy-panel/backup as a fixed,
+#       non-configurable installation convention, or
+#   (b) regenerate this file from the actual configured BACKUP_DIR at
+#       install time instead of copying it verbatim.
+# This file does not enforce which option install.sh takes — it only
+# documents that the coupling exists and must be honored by whichever
+# stage writes the final /etc/sudoers.d/tgproxy-panel.
+#
+# apply-profiles.sh itself re-validates that its argument resolves inside
+# this same directory (defense in depth — see its own header comment), so
+# a sudoers misconfiguration alone cannot turn this into an arbitrary-file
+# installer, but it *can* break applies outright if BACKUP_DIR diverges.
+
+tgproxy-panel ALL=(root) NOPASSWD: /opt/tgproxy-panel/bin/apply-profiles.sh /opt/tgproxy-panel/backup/candidates/*
