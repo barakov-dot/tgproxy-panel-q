@@ -43,8 +43,20 @@ type Config struct {
 
 	ApplyProfilesScript string
 
+	// TproxyServerBin is the tproxy-server binary internal/applier shells
+	// out to for `-check` validation before staging a candidate
+	// profiles.json (see CLAUDE.md's verified facts on -check). Optional:
+	// defaults to where tproxy-server's own install.sh installs it, since
+	// most deployments never need to override this.
+	TproxyServerBin string
+
 	LogFormat string
 }
+
+// defaultTproxyServerBin is where tproxy-server's own install.sh installs
+// the binary (verified against the reference install.sh); used when
+// TPROXY_SERVER_BIN is unset.
+const defaultTproxyServerBin = "/usr/local/bin/tproxy-server"
 
 // Load reads and validates configuration from the process environment. It
 // returns a descriptive error (rather than panicking) listing every problem
@@ -79,6 +91,8 @@ func Load() (*Config, error) {
 	cfg.BackupKeep = requirePositiveInt(&errs, "BACKUP_KEEP")
 
 	cfg.ApplyProfilesScript = requireAbsPath(&errs, "APPLY_PROFILES_SCRIPT")
+
+	cfg.TproxyServerBin = optionalAbsPath(&errs, "TPROXY_SERVER_BIN", defaultTproxyServerBin)
 
 	cfg.LogFormat = logFormat(&errs)
 
@@ -197,6 +211,19 @@ func requireBool(errs *[]error, key string) bool {
 		return false
 	}
 	return b
+}
+
+// optionalAbsPath reads an optional absolute-path variable, falling back to
+// def when unset (mirroring logFormat's default-handling below).
+func optionalAbsPath(errs *[]error, key, def string) string {
+	v := getenv(key)
+	if v == "" {
+		return def
+	}
+	if !filepath.IsAbs(v) {
+		*errs = append(*errs, fmt.Errorf("%s must be an absolute path, got %q", key, v))
+	}
+	return v
 }
 
 // logFormat is the only variable with a real default (matching the "json is

@@ -45,7 +45,7 @@ func setEnv(t *testing.T, env map[string]string) {
 		"TPROXY_HOSTNAME", "TPROXY_SERVICE_NAME", "TPROXY_PROFILES_PATH",
 		"TPROXY_CONFIG_PATH", "TPROXY_ADMIN_URL", "CADDYFILE_PATH",
 		"TPROXY_BACKEND", "TPROXY_CARRIER_MODE", "DB_PATH", "BACKUP_DIR",
-		"BACKUP_KEEP", "APPLY_PROFILES_SCRIPT", "LOG_FORMAT",
+		"BACKUP_KEEP", "APPLY_PROFILES_SCRIPT", "TPROXY_SERVER_BIN", "LOG_FORMAT",
 	}
 	for _, k := range keys {
 		t.Setenv(k, "")
@@ -77,6 +77,34 @@ func TestLoad_Valid(t *testing.T) {
 	}
 	if cfg.BackupKeep != 100 {
 		t.Errorf("BackupKeep = %d, want 100", cfg.BackupKeep)
+	}
+	if cfg.TproxyServerBin != "/usr/local/bin/tproxy-server" {
+		t.Errorf("TproxyServerBin = %q, want default /usr/local/bin/tproxy-server", cfg.TproxyServerBin)
+	}
+}
+
+func TestLoad_TproxyServerBinOverride(t *testing.T) {
+	env := validEnv()
+	env["TPROXY_SERVER_BIN"] = "/opt/tproxy-server/bin/tproxy-server"
+	setEnv(t, env)
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() returned error: %v", err)
+	}
+	if cfg.TproxyServerBin != "/opt/tproxy-server/bin/tproxy-server" {
+		t.Errorf("TproxyServerBin = %q, want override", cfg.TproxyServerBin)
+	}
+}
+
+func TestLoad_TproxyServerBinRelativeRejected(t *testing.T) {
+	env := validEnv()
+	env["TPROXY_SERVER_BIN"] = "relative/tproxy-server"
+	setEnv(t, env)
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "TPROXY_SERVER_BIN") {
+		t.Fatalf("expected TPROXY_SERVER_BIN error, got %v", err)
 	}
 }
 
