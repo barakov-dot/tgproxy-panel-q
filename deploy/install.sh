@@ -316,8 +316,15 @@ done
 unset admin_password_1 admin_password_2
 
 # --- 7. Random 20-char path token (plan.md step 6; recipe matches .env.example) ---
-
-panel_path_token="$(tr -dc 'a-zA-Z0-9' </dev/urandom | head -c20)"
+#
+# Run in a subshell with pipefail off: `tr` reads /dev/urandom (an infinite
+# source) and keeps writing until `head -c20` has read its fill and closes
+# the pipe, which sends `tr` a SIGPIPE (exit 141). Under this script's own
+# `set -euo pipefail`, that non-zero status would otherwise abort the whole
+# installer right here with no error message the moment `head` is satisfied
+# — `head` itself still exits 0 with the correct 20 bytes, so the pipeline's
+# actual result is fine; only pipefail's bookkeeping treats it as a failure.
+panel_path_token="$(set +o pipefail; tr -dc 'a-zA-Z0-9' </dev/urandom | head -c20)"
 
 if command -v openssl >/dev/null 2>&1; then
     session_secret="$(openssl rand -hex 32)"
