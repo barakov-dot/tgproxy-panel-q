@@ -1,0 +1,24 @@
+# Build artifacts
+/tgproxy-panel
+/bin/tgproxy-panel
+*.exe
+*.test
+*.out
+
+# Local runtime state (never commit real secrets/data)
+.env
+data/
+backup/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Go tooling
+/vendor/
+
+# Editor/OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
