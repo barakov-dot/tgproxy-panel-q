@@ -134,7 +134,7 @@ tgproxy-panel ALL=(root) NOPASSWD: /opt/tgproxy-panel/bin/apply-profiles.sh
    profiles.json: keep every non-panel profile unchanged (e.g. upstream `default`),
    replace all panel-managed entries with the candidate list
 3. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
-4. Sync MTProxy secrets from merged profiles → `/etc/mtproxy/mtproxy.secrets` (one per line, each becomes `-S`); keep a single `MTPROXY_SECRET` in `mtproxy.env`; restart `mtproxy` if changed
+4. Sync MTProxy secrets from live `$TPROXY_PROFILES_PATH` → `/etc/mtproxy/mtproxy.secrets` (one per line, each becomes `-S`); keep a single `MTPROXY_SECRET` in `mtproxy.env`; restart `mtproxy` if changed (after tproxy-server restart succeeds)
 5. Rotate backups (keep last `BACKUP_KEEP`)
 6. Atomic install to `$TPROXY_PROFILES_PATH` with correct owner/mode
 7. `systemctl restart tproxy-server`

@@ -144,8 +144,15 @@ func (a *Applier) apply(ctx context.Context) (*Result, error) {
 }
 
 func (a *Applier) validateCandidate(ctx context.Context, candidatePath string) error {
-	if _, err := ReadProfiles(candidatePath); err != nil {
+	pf, err := ReadProfiles(candidatePath)
+	if err != nil {
 		return fmt.Errorf("%w: %v", ErrValidationFailed, err)
+	}
+
+	// Panel-only candidates may be empty after revoke; apply-profiles.sh merges
+	// them with non-panel profiles (e.g. upstream "default") before -check.
+	if len(pf.Profiles) == 0 {
+		return nil
 	}
 
 	if a.cfg.TproxyServerBin == "" {

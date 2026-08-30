@@ -22,26 +22,28 @@
 #   1. Validate invocation (exactly one arg, existing regular file, no
 #      path-traversal tricks).
 #   2. Cheap structural JSON pre-filter (best-effort, not authoritative).
-#   3. Authoritative validation: `tproxy-server -config ... -profiles-file
-#      <candidate> -check`.
-#   3b. Merge candidate with the live profiles.json: keep every profile whose
+#   3. Merge candidate with the live profiles.json: keep every profile whose
 #      name is NOT panel-managed (user_<telegram_id>), replace all panel-managed
 #      entries with the candidate list. This preserves pre-existing profiles
 #      such as "default" that tproxy-server shipped with.
-#   3c. Verify every profile backend port is listening on loopback.
-#   3d. Sync MTProxy `-S` secrets from merged profiles (multi-secret on one
-#       mtproto-proxy) and restart mtproxy when the secret set changed.
-#   4. Backup the current live profiles.json (skip if this is the first
+#   4. Authoritative validation: `tproxy-server -check` on the merged file
+#      (not the panel-only candidate — it may be empty after revoke).
+#   5. Verify every profile backend port is listening on loopback.
+#   6. Backup the current live profiles.json (skip if this is the first
 #      ever run and none exists yet).
-#   5. Rotate backups, keeping only the newest BACKUP_KEEP.
-#   6. Atomically install the candidate as the new profiles.json
+#   7. Rotate backups, keeping only the newest BACKUP_KEEP.
+#   8. Atomically install the merged candidate as the new profiles.json
 #      (temp file in the same directory + chown root:tproxy + chmod 0400 +
 #      rename).
-#   7. systemctl restart the tproxy-server service. If systemctl itself
+#   9. systemctl restart the tproxy-server service. If systemctl itself
 #      rejects the restart request, best-effort restore the backup taken
-#      in step 4 before exiting non-zero, so the live file is left as
+#      in step 6 before exiting non-zero, so the live file is left as
 #      close as possible to how it was found.
-#   8. Print a one-line, secret-free summary on every exit path.
+#  10. Sync MTProxy `-S` secrets from the live profiles.json →
+#      /etc/mtproxy/mtproxy.secrets (one per line); restart mtproxy when
+#      the secret set changed. Runs only after profiles.json is installed
+#      and tproxy-server restart succeeded, so revoke/issue always match.
+#  11. Print a one-line, secret-free summary on every exit path.
 #
 # This script deliberately does NOT poll /readyz — internal/applier
 # (applier.go's apply()) does that itself after this script returns 0.
@@ -200,15 +202,7 @@ else
     info "no python3/jq available, skipping structural pre-filter (relying on -check)"
 fi
 
-# --- 3. Authoritative validation via tproxy-server's own parser ---
-
-if ! check_stderr="$("$TPROXY_SERVER_BIN" -config "$TPROXY_CONFIG_PATH" -profiles-file "$candidate" -check 2>&1 >/dev/null)"; then
-    echo "$check_stderr" >&2
-    die "candidate failed tproxy-server -check validation"
-fi
-info "tproxy-server -check passed"
-
-# --- 3b. Merge panel candidate with existing non-panel profiles ---
+# --- 3. Merge panel candidate with existing non-panel profiles ---
 
 merged_tmp="$(mktemp "${BACKUP_DIR}/.profiles.merged.XXXXXX")"
 tmp_merged="$merged_tmp"
@@ -283,13 +277,15 @@ fi
 candidate="$merged_tmp"
 info "merged panel candidate with existing non-panel profiles ($(wc -c < "$candidate") bytes)"
 
+# --- 4. Authoritative validation via tproxy-server's own parser (merged) ---
+
 if ! check_stderr="$("$TPROXY_SERVER_BIN" -config "$TPROXY_CONFIG_PATH" -profiles-file "$candidate" -check 2>&1 >/dev/null)"; then
     echo "$check_stderr" >&2
     die "merged profiles failed tproxy-server -check validation"
 fi
 info "tproxy-server -check passed on merged profiles"
 
-# --- 3c. Verify MTProxy backend port is listening ---
+# --- 5. Verify MTProxy backend port is listening ---
 
 if command -v ss >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
     while IFS= read -r backend; do
@@ -312,7 +308,120 @@ PY
     info "all profile backend ports are listening"
 fi
 
-# --- 3d. Sync MTProxy secrets (multi -S on one mtproto-proxy) ---
+# --- 6. Backup current live profiles.json ---
+
+mkdir -p "$BACKUP_DIR"
+chmod 0700 "$BACKUP_DIR"
+
+backup_path=""
+if [ -e "$TPROXY_PROFILES_PATH" ]; then
+    ts="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+    backup_path="${BACKUP_DIR%/}/profiles.json.${ts}.bak"
+    # Guard against two applies landing in the same second (unlikely but
+    # possible under load): fall back to a numeric suffix rather than
+    # silently overwriting an existing backup.
+    if [ -e "$backup_path" ]; then
+        n=1
+        while [ -e "${BACKUP_DIR%/}/profiles.json.${ts}.${n}.bak" ]; do
+            n=$((n + 1))
+        done
+        backup_path="${BACKUP_DIR%/}/profiles.json.${ts}.${n}.bak"
+    fi
+    cp -p -- "$TPROXY_PROFILES_PATH" "$backup_path"
+    info "backed up current profiles.json to $backup_path"
+else
+    info "no existing profiles.json at $TPROXY_PROFILES_PATH, skipping backup (first run?)"
+fi
+
+# --- 7. Rotate backups, keep newest BACKUP_KEEP ---
+
+if [ "$BACKUP_KEEP" -gt 0 ]; then
+    # profiles.json.<timestamp>[.n].bak sorts lexically = chronologically
+    # given the timestamp format above, so a plain sort on filenames is
+    # sufficient without needing to stat mtimes.
+    mapfile -t backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'profiles.json.*.bak' -printf '%f\n' 2>/dev/null | sort)
+    count="${#backups[@]}"
+    if [ "$count" -gt "$BACKUP_KEEP" ]; then
+        remove_count=$((count - BACKUP_KEEP))
+        for ((i = 0; i < remove_count; i++)); do
+            rm -f -- "${BACKUP_DIR%/}/${backups[$i]}"
+        done
+        info "rotated backups: removed $remove_count old file(s), kept $BACKUP_KEEP"
+    fi
+fi
+
+# --- 8. Atomic install of the candidate as the new profiles.json ---
+
+profiles_dir="$(dirname -- "$TPROXY_PROFILES_PATH")"
+mkdir -p "$profiles_dir"
+
+tmp_install="$(mktemp "${profiles_dir}/.profiles.json.XXXXXX")"
+cp -- "$candidate" "$tmp_install"
+
+if ! chown "$PROFILES_OWNER" "$tmp_install" 2>/dev/null; then
+    die "failed to chown $tmp_install to $PROFILES_OWNER (must run as root)"
+fi
+if ! chmod "$PROFILES_MODE" "$tmp_install"; then
+    die "failed to chmod $tmp_install to $PROFILES_MODE"
+fi
+
+mv -f -- "$tmp_install" "$TPROXY_PROFILES_PATH"
+tmp_install=""
+profile_count="?"
+profile_names=""
+if command -v python3 >/dev/null 2>&1; then
+    profile_count="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("profiles", [])))' "$TPROXY_PROFILES_PATH" 2>/dev/null || echo '?')"
+    profile_names="$(python3 - "$TPROXY_PROFILES_PATH" "$panel_candidate" <<'PY' 2>/dev/null || true
+import json, sys
+
+installed_path, panel_candidate_path = sys.argv[1:3]
+with open(installed_path, encoding="utf-8") as f:
+    installed = json.load(f)
+with open(panel_candidate_path, encoding="utf-8") as f:
+    panel = json.load(f)
+
+installed_names = {p.get("name") for p in installed.get("profiles", [])}
+missing = []
+for p in panel.get("profiles", []):
+    name = p.get("name")
+    if name and name not in installed_names:
+        missing.append(name)
+if missing:
+    print("MISSING:" + ",".join(missing))
+    sys.exit(1)
+print(",".join(sorted(n for n in installed_names if n)))
+PY
+)"
+    if [[ "$profile_names" == MISSING:* ]]; then
+        die "installed profiles.json is missing panel profile(s): ${profile_names#MISSING:}"
+    fi
+fi
+info "installed new profiles.json ($profile_count profile(s)) at $TPROXY_PROFILES_PATH${profile_names:+, names: $profile_names}"
+
+# --- 9. Restart tproxy-server ---
+
+if ! systemctl restart "$TPROXY_SERVICE_NAME"; then
+    info "systemctl restart $TPROXY_SERVICE_NAME failed, attempting best-effort restore of previous profiles.json"
+    if [ -n "$backup_path" ] && [ -e "$backup_path" ]; then
+        tmp_restore="$(mktemp "${profiles_dir}/.profiles.json.XXXXXX")"
+        if cp -- "$backup_path" "$tmp_restore" \
+            && chown "$PROFILES_OWNER" "$tmp_restore" 2>/dev/null \
+            && chmod "$PROFILES_MODE" "$tmp_restore"; then
+            mv -f -- "$tmp_restore" "$TPROXY_PROFILES_PATH"
+            tmp_restore=""
+            info "restored previous profiles.json from $backup_path"
+        else
+            echo "${PROG}: WARNING: restore from $backup_path FAILED, live profiles.json may be inconsistent" >&2
+        fi
+    else
+        info "no backup was taken (first run), nothing to restore"
+    fi
+    die "systemctl restart $TPROXY_SERVICE_NAME failed"
+fi
+
+info "restarted $TPROXY_SERVICE_NAME successfully"
+
+# --- 10. Sync MTProxy secrets from live profiles.json (multi -S) ---
 
 sync_mtproxy_secrets() {
     local profiles_path="$1"
@@ -367,8 +476,6 @@ if os.path.isfile(env_path):
 while lines and not lines[-1].strip():
     lines.pop()
 
-# mtproxy.env: exactly one secret (default/first). Additional secrets live in
-# mtproxy.secrets and are passed as separate `-S` flags by mtproxy-exec.sh.
 lines.append(f"MTPROXY_SECRET={seen[0]}")
 
 with open(env_out_path, "w", encoding="utf-8") as f:
@@ -378,7 +485,7 @@ print(len(seen))
 PY
 )"; then
         rm -f "$secrets_tmp" "$env_tmp"
-        die "failed to sync MTProxy secrets from merged profiles"
+        die "failed to sync MTProxy secrets from profiles.json"
     fi
 
     if [ -f "$MTPROXY_SECRETS_FILE" ] && cmp -s "$secrets_tmp" "$MTPROXY_SECRETS_FILE"; then
@@ -406,118 +513,6 @@ PY
     info "restarted $MTPROXY_SERVICE_NAME with $count secret(s)"
 }
 
-sync_mtproxy_secrets "$candidate"
+sync_mtproxy_secrets "$TPROXY_PROFILES_PATH"
 
-# --- 4. Backup current live profiles.json ---
-
-mkdir -p "$BACKUP_DIR"
-chmod 0700 "$BACKUP_DIR"
-
-backup_path=""
-if [ -e "$TPROXY_PROFILES_PATH" ]; then
-    ts="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
-    backup_path="${BACKUP_DIR%/}/profiles.json.${ts}.bak"
-    # Guard against two applies landing in the same second (unlikely but
-    # possible under load): fall back to a numeric suffix rather than
-    # silently overwriting an existing backup.
-    if [ -e "$backup_path" ]; then
-        n=1
-        while [ -e "${BACKUP_DIR%/}/profiles.json.${ts}.${n}.bak" ]; do
-            n=$((n + 1))
-        done
-        backup_path="${BACKUP_DIR%/}/profiles.json.${ts}.${n}.bak"
-    fi
-    cp -p -- "$TPROXY_PROFILES_PATH" "$backup_path"
-    info "backed up current profiles.json to $backup_path"
-else
-    info "no existing profiles.json at $TPROXY_PROFILES_PATH, skipping backup (first run?)"
-fi
-
-# --- 5. Rotate backups, keep newest BACKUP_KEEP ---
-
-if [ "$BACKUP_KEEP" -gt 0 ]; then
-    # profiles.json.<timestamp>[.n].bak sorts lexically = chronologically
-    # given the timestamp format above, so a plain sort on filenames is
-    # sufficient without needing to stat mtimes.
-    mapfile -t backups < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name 'profiles.json.*.bak' -printf '%f\n' 2>/dev/null | sort)
-    count="${#backups[@]}"
-    if [ "$count" -gt "$BACKUP_KEEP" ]; then
-        remove_count=$((count - BACKUP_KEEP))
-        for ((i = 0; i < remove_count; i++)); do
-            rm -f -- "${BACKUP_DIR%/}/${backups[$i]}"
-        done
-        info "rotated backups: removed $remove_count old file(s), kept $BACKUP_KEEP"
-    fi
-fi
-
-# --- 6. Atomic install of the candidate as the new profiles.json ---
-
-profiles_dir="$(dirname -- "$TPROXY_PROFILES_PATH")"
-mkdir -p "$profiles_dir"
-
-tmp_install="$(mktemp "${profiles_dir}/.profiles.json.XXXXXX")"
-cp -- "$candidate" "$tmp_install"
-
-if ! chown "$PROFILES_OWNER" "$tmp_install" 2>/dev/null; then
-    die "failed to chown $tmp_install to $PROFILES_OWNER (must run as root)"
-fi
-if ! chmod "$PROFILES_MODE" "$tmp_install"; then
-    die "failed to chmod $tmp_install to $PROFILES_MODE"
-fi
-
-mv -f -- "$tmp_install" "$TPROXY_PROFILES_PATH"
-tmp_install=""
-profile_count="?"
-profile_names=""
-if command -v python3 >/dev/null 2>&1; then
-    profile_count="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("profiles", [])))' "$TPROXY_PROFILES_PATH" 2>/dev/null || echo '?')"
-    profile_names="$(python3 - "$TPROXY_PROFILES_PATH" "$panel_candidate" <<'PY' 2>/dev/null || true
-import json, sys
-
-installed_path, panel_candidate_path = sys.argv[1:3]
-with open(installed_path, encoding="utf-8") as f:
-    installed = json.load(f)
-with open(panel_candidate_path, encoding="utf-8") as f:
-    panel = json.load(f)
-
-installed_names = {p.get("name") for p in installed.get("profiles", [])}
-missing = []
-for p in panel.get("profiles", []):
-    name = p.get("name")
-    if name and name not in installed_names:
-        missing.append(name)
-if missing:
-    print("MISSING:" + ",".join(missing))
-    sys.exit(1)
-print(",".join(sorted(n for n in installed_names if n)))
-PY
-)"
-    if [[ "$profile_names" == MISSING:* ]]; then
-        die "installed profiles.json is missing panel profile(s): ${profile_names#MISSING:}"
-    fi
-fi
-info "installed new profiles.json ($profile_count profile(s)) at $TPROXY_PROFILES_PATH${profile_names:+, names: $profile_names}"
-
-# --- 7. Restart tproxy-server ---
-
-if ! systemctl restart "$TPROXY_SERVICE_NAME"; then
-    info "systemctl restart $TPROXY_SERVICE_NAME failed, attempting best-effort restore of previous profiles.json"
-    if [ -n "$backup_path" ] && [ -e "$backup_path" ]; then
-        tmp_restore="$(mktemp "${profiles_dir}/.profiles.json.XXXXXX")"
-        if cp -- "$backup_path" "$tmp_restore" \
-            && chown "$PROFILES_OWNER" "$tmp_restore" 2>/dev/null \
-            && chmod "$PROFILES_MODE" "$tmp_restore"; then
-            mv -f -- "$tmp_restore" "$TPROXY_PROFILES_PATH"
-            tmp_restore=""
-            info "restored previous profiles.json from $backup_path"
-        else
-            echo "${PROG}: WARNING: restore from $backup_path FAILED, live profiles.json may be inconsistent" >&2
-        fi
-    else
-        info "no backup was taken (first run), nothing to restore"
-    fi
-    die "systemctl restart $TPROXY_SERVICE_NAME failed"
-fi
-
-info "restarted $TPROXY_SERVICE_NAME successfully"
 exit 0
