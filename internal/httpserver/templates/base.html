@@ -1,0 +1,35 @@
+{{define "head"}}
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tgproxy-panel</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config = { darkMode: 'media' }</script>
+<script src="https://unpkg.com/htmx.org@1.9.12"></script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  ::-webkit-scrollbar { height: 8px; width: 8px; }
+</style>
+{{end}}
+
+{{define "nav"}}
+<nav class="border-b border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+  <div class="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6">
+    <div class="flex items-center gap-6">
+      <span class="text-sm font-semibold tracking-tight text-slate-900 dark:text-slate-100">tgproxy&nbsp;panel</span>
+      <a href="{{.Base}}/"
+         class="text-sm font-medium {{if eq .ActivePage "users"}}text-indigo-600 dark:text-indigo-400{{else}}text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100{{end}}">
+        Пользователи
+      </a>
+      <a href="{{.Base}}/settings"
+         class="text-sm font-medium {{if eq .ActivePage "settings"}}text-indigo-600 dark:text-indigo-400{{else}}text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100{{end}}">
+        Настройки
+      </a>
+    </div>
+    <form method="post" action="{{.Base}}/logout">
+      <button type="submit" class="text-sm font-medium text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100">
+        Выход
+      </button>
+    </form>
+  </div>
+</nav>
+{{end}}

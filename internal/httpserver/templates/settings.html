@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru" class="h-full">
+<head>
+{{template "head" .}}
+</head>
+<body class="min-h-screen bg-slate-50 dark:bg-slate-950">
+{{template "nav" .}}
+<main class="mx-auto max-w-3xl space-y-6 px-4 py-8 sm:px-6">
+  <h1 class="text-xl font-semibold text-slate-900 dark:text-slate-100">Настройки</h1>
+
+  <div id="settings-form" class="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+    <h2 class="mb-1 text-sm font-semibold text-slate-900 dark:text-slate-100">Автоматическая выдача</h2>
+    <p class="mb-4 text-sm text-slate-500 dark:text-slate-400">
+      Если включено, прокси выдаётся сразу при запросе в боте. Если выключено, каждая заявка ждёт подтверждения администратора.
+    </p>
+    <form hx-post="{{.Base}}/settings/auto-issue" hx-target="#settings-form" hx-swap="outerHTML">
+      <label class="inline-flex cursor-pointer items-center gap-3">
+        <input type="checkbox" name="auto_issue" {{if .AutoIssue}}checked{{end}} onchange="this.form.requestSubmit()"
+               class="h-5 w-5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 dark:border-slate-700">
+        <span class="text-sm text-slate-700 dark:text-slate-300">
+          {{if .AutoIssue}}Включена{{else}}Выключена{{end}}
+        </span>
+      </label>
+    </form>
+  </div>
+
+  <div class="rounded-2xl border border-slate-200 bg-white p-6 dark:border-slate-800 dark:bg-slate-900">
+    <h2 class="mb-3 text-sm font-semibold text-slate-900 dark:text-slate-100">Последние бэкапы</h2>
+    {{if .BackupErr}}
+      <p class="text-sm text-rose-600 dark:text-rose-400">{{.BackupErr}}</p>
+    {{else if not .Backups}}
+      <p class="text-sm text-slate-500 dark:text-slate-400">Бэкапов пока нет.</p>
+    {{else}}
+      <ul class="divide-y divide-slate-100 text-sm dark:divide-slate-800">
+        {{range .Backups}}
+        <li class="flex items-center justify-between py-2">
+          <span class="font-mono text-slate-700 dark:text-slate-300">{{.Name}}</span>
+          <span class="text-slate-400">{{formatTimeValue .ModTime}}</span>
+        </li>
+        {{end}}
+      </ul>
+    {{end}}
+  </div>
+</main>
+</body>
+</html>

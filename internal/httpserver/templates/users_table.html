@@ -1,0 +1,40 @@
+{{define "sort_link"}}
+{{- /* . is a struct{Table usersTableData; Col SortColumn; Label string} */ -}}
+{{$next := "desc"}}{{if and (eq .Table.Sort .Col) (eq .Table.Dir "desc")}}{{$next = "asc"}}{{end}}
+<a href="{{$.Table.Base}}/users/table?sort={{.Col}}&dir={{$next}}&q={{.Table.Query | urlquery}}{{if .Table.OnlyPending}}&filter=pending{{end}}"
+   hx-get="{{$.Table.Base}}/users/table?sort={{.Col}}&dir={{$next}}&q={{.Table.Query | urlquery}}{{if .Table.OnlyPending}}&filter=pending{{end}}"
+   hx-target="#users-table-wrap" hx-swap="innerHTML" hx-push-url="true"
+   class="inline-flex items-center gap-1 select-none hover:text-slate-900 dark:hover:text-slate-100">
+  {{.Label}}{{if eq .Table.Sort .Col}}<span class="text-slate-400">{{if eq .Table.Dir "asc"}}&uarr;{{else}}&darr;{{end}}</span>{{end}}
+</a>
+{{end}}
+
+<div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+<table class="min-w-full divide-y divide-slate-200 text-sm dark:divide-slate-800">
+  <thead class="bg-slate-50 dark:bg-slate-900/60">
+    <tr class="text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+      <th class="px-4 py-3">{{template "sort_link" (dict "Table" . "Col" "telegram_id" "Label" "Telegram ID")}}</th>
+      <th class="px-4 py-3">{{template "sort_link" (dict "Table" . "Col" "name" "Label" "Имя")}}</th>
+      <th class="px-4 py-3">{{template "sort_link" (dict "Table" . "Col" "status" "Label" "Статус")}}</th>
+      <th class="px-4 py-3">{{template "sort_link" (dict "Table" . "Col" "requested_at" "Label" "Запрос")}}</th>
+      <th class="px-4 py-3">{{template "sort_link" (dict "Table" . "Col" "issued_at" "Label" "Выдан")}}</th>
+    </tr>
+  </thead>
+  <tbody class="divide-y divide-slate-100 dark:divide-slate-800">
+    {{if not .Users}}
+    <tr><td colspan="5" class="px-4 py-8 text-center text-slate-400">Ничего не найдено.</td></tr>
+    {{end}}
+    {{range .Users}}
+    <tr class="{{if .IsPending}}bg-amber-50/60 dark:bg-amber-400/5{{end}} hover:bg-slate-50 dark:hover:bg-slate-800/60">
+      <td class="px-4 py-3">
+        <a href="{{$.Base}}/users/{{.ID}}" class="font-medium text-indigo-600 hover:underline dark:text-indigo-400">{{.TelegramID}}</a>
+      </td>
+      <td class="px-4 py-3 text-slate-700 dark:text-slate-300">{{.DisplayName}}</td>
+      <td class="px-4 py-3"><span class="{{statusBadgeClass .Status}}">{{statusLabel .Status}}</span></td>
+      <td class="px-4 py-3 text-slate-500 dark:text-slate-400">{{formatTime .RequestedAt}}</td>
+      <td class="px-4 py-3 text-slate-500 dark:text-slate-400">{{formatTime .IssuedAt}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+</div>

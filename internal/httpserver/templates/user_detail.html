@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="ru" class="h-full">
+<head>
+{{template "head" .}}
+<script>
+function copyLink(btn, link) {
+  navigator.clipboard.writeText(link).then(function () {
+    var original = btn.textContent;
+    btn.textContent = "Скопировано!";
+    setTimeout(function () { btn.textContent = original; }, 1500);
+  });
+}
+</script>
+</head>
+<body class="min-h-screen bg-slate-50 dark:bg-slate-950">
+{{template "nav" .}}
+<main class="mx-auto max-w-3xl px-4 py-8 sm:px-6">
+  <a href="{{.Base}}/" class="mb-4 inline-block text-sm text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-100">&larr; К списку пользователей</a>
+  {{template "user_detail_content.html" .}}
+</main>
+</body>
+</html>
