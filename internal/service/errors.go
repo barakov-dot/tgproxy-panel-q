@@ -10,6 +10,7 @@ var (
 	ErrRevokeApplyFailed = errors.New("service: applying the revoke on the host failed")
 	ErrNoBotSender       = errors.New("service: bot sender not configured")
 	ErrNoProxyLink       = errors.New("service: user has no proxy link")
+	ErrNotDeletable      = errors.New("service: only revoked or denied users can be deleted")
 )
 
 const (
@@ -19,6 +20,7 @@ const (
 	auditActionRevokeApplyFail = "revoke_apply_failed"
 	auditActionDeny            = "deny"
 	auditActionResend          = "resend"
+	auditActionDelete          = "delete"
 )
 
 // ActorAutoIssue identifies audit entries for automatic issuance.

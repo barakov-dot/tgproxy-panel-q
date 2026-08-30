@@ -24,6 +24,7 @@ type Store interface {
 	GetSetting(ctx context.Context, key string) (string, bool, error)
 	SetSetting(ctx context.Context, key, value string) error
 	AppendAuditLog(ctx context.Context, entry models.AuditLog) error
+	DeleteUser(ctx context.Context, id int64) error
 }
 
 // Applier pushes desired profiles.json state to the host.

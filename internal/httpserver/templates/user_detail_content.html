@@ -84,6 +84,13 @@
     {{else}}
       <button hx-post="{{.Base}}/users/{{.User.ID}}/approve" hx-target="#user-detail-content" hx-swap="outerHTML"
               class="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-500">Выдать снова</button>
+      {{if or (eq .User.Status "revoked") (eq .User.Status "denied")}}
+      <button hx-post="{{.Base}}/users/{{.User.ID}}/delete"
+              hx-confirm="Удалить пользователя из базы? Запись исчезнет из списка; при новом запросе в боте он будет создан заново."
+              class="rounded-lg border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800">
+        Удалить из базы
+      </button>
+      {{end}}
     {{end}}
   </div>
 

@@ -151,6 +151,30 @@ func (s *Server) handleRevoke(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	u, err := s.userByIDParam(r)
+	if err != nil {
+		s.notFoundOrError(w, r, err)
+		return
+	}
+
+	if err := s.svc.Delete(r.Context(), u.ID, s.actorName()); err != nil {
+		msg := userFacingActionError(err)
+		current, lookupErr := s.svc.GetUser(r.Context(), u.ID)
+		if lookupErr != nil {
+			s.log.Error("re-lookup user after failed delete", "error", lookupErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		s.log.Error("delete user failed", "error", err, "user_id", u.ID)
+		s.renderUserDetail(w, r, current, "", msg)
+		return
+	}
+
+	w.Header().Set("HX-Redirect", s.base()+"/")
+	w.WriteHeader(http.StatusOK)
+}
+
 func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 	s.runUserAction(w, r, func(ctx context.Context, userID int64) (*models.User, error) {
 		return s.svc.Deny(ctx, userID, s.actorName())
@@ -218,6 +242,8 @@ func userFacingActionError(err error) string {
 		return "Не удалось выдать профиль на сервере. Изменения отменены, повторите попытку или обратитесь к администратору."
 	case errors.Is(err, service.ErrRevokeApplyFailed):
 		return "Статус изменён на «отозван», но применить изменения на сервере не удалось. Повторите попытку."
+	case errors.Is(err, service.ErrNotDeletable):
+		return "Удалить можно только пользователей со статусом «отозван» или «отклонён»."
 	default:
 		return "Внутренняя ошибка. Попробуйте ещё раз."
 	}

@@ -35,6 +35,7 @@ func (s *Server) routes() http.Handler {
 			r.Post("/users/{id}/approve", s.handleApprove)
 			r.Post("/users/{id}/deny", s.handleDeny)
 			r.Post("/users/{id}/revoke", s.handleRevoke)
+			r.Post("/users/{id}/delete", s.handleDelete)
 			r.Post("/users/{id}/send", s.handleSend)
 
 			r.Get("/settings", s.handleSettings)

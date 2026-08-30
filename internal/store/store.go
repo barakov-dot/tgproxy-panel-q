@@ -286,6 +286,33 @@ func (s *Store) SetUserProfile(ctx context.Context, id int64, profileName, secre
 	return s.GetUserByID(ctx, id)
 }
 
+// DeleteUser permanently removes a user row. Audit rows for the user keep
+// their history with user_id cleared so the FK stays valid.
+func (s *Store) DeleteUser(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: delete user id=%d: begin tx: %w", id, err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `UPDATE audit_log SET user_id = NULL WHERE user_id = ?`, id); err != nil {
+		return fmt.Errorf("store: delete user id=%d: detach audit: %w", id, err)
+	}
+
+	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("store: delete user id=%d: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: delete user id=%d: commit: %w", id, err)
+	}
+	return nil
+}
+
 // ClearUserProfile removes profile_name and secret without changing status.
 func (s *Store) ClearUserProfile(ctx context.Context, id int64) (*models.User, error) {
 	res, err := s.db.ExecContext(ctx, `UPDATE users SET profile_name = NULL, secret = NULL WHERE id = ?`, id)

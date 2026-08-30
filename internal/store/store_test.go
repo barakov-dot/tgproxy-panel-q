@@ -259,3 +259,45 @@ func TestAuditLog_AppendAndList(t *testing.T) {
 		t.Errorf("entries[1].UserID = %v, want %d", entries[1].UserID, userID)
 	}
 }
+
+func TestDeleteUser(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	u, err := s.CreateUser(ctx, 77, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AppendAuditLog(ctx, models.AuditLog{
+		Action: "revoke",
+		Actor:  "admin",
+		UserID: &u.ID,
+		Detail: "profile_name=user_77",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateUserStatus(ctx, u.ID, models.StatusRevoked); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteUser(ctx, u.ID); err != nil {
+		t.Fatalf("DeleteUser() error = %v", err)
+	}
+	if _, err := s.GetUserByID(ctx, u.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("user should be deleted, err = %v", err)
+	}
+
+	entries, err := s.ListAuditLog(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("audit entries = %d, want 1", len(entries))
+	}
+	if entries[0].UserID != nil {
+		t.Errorf("audit user_id should be cleared, got %v", entries[0].UserID)
+	}
+	if entries[0].Action != "revoke" {
+		t.Errorf("audit action = %q", entries[0].Action)
+	}
+}

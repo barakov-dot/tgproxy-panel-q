@@ -143,6 +143,16 @@ func (f *fakeStore) AppendAuditLog(_ context.Context, entry models.AuditLog) err
 	return nil
 }
 
+func (f *fakeStore) DeleteUser(_ context.Context, id int64) error {
+	for tgID, u := range f.users {
+		if u.ID == id {
+			delete(f.users, tgID)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
 func (f *fakeStore) ListUsers(_ context.Context, _ store.UserListFilter, _ store.UserListSort) ([]*models.User, error) {
 	out := make([]*models.User, 0, len(f.users))
 	for _, u := range f.users {

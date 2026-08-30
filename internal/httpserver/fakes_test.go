@@ -253,6 +253,18 @@ func (f *fakeStore) AppendAuditLog(_ context.Context, entry models.AuditLog) err
 	return nil
 }
 
+func (f *fakeStore) DeleteUser(_ context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for tgID, u := range f.users {
+		if u.ID == id {
+			delete(f.users, tgID)
+			return nil
+		}
+	}
+	return store.ErrNotFound
+}
+
 type fakeApplier struct {
 	mu          sync.Mutex
 	IssueErr    error
