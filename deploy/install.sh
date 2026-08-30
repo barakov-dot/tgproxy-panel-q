@@ -581,10 +581,10 @@ ExecStart=/opt/tgproxy-panel/bin/mtproxy-exec.sh
 EOF
     install -d -m 0750 -o root -g mtproxy /etc/mtproxy
     if [ -f "$profiles_path" ] && command -v python3 >/dev/null 2>&1; then
-        python3 - "$profiles_path" /etc/mtproxy/mtproxy.env <<'PY' || true
+        python3 - "$profiles_path" /etc/mtproxy/mtproxy.env /etc/mtproxy/mtproxy.secrets <<'PY' || true
 import json, os, re, sys
 
-profiles_path, env_path = sys.argv[1:3]
+profiles_path, env_path, secrets_path = sys.argv[1:4]
 secret_re = re.compile(r"^(?:dd)?[0-9a-f]{32}$")
 seen = []
 for profile in json.load(open(profiles_path, encoding="utf-8")).get("profiles", []):
@@ -595,6 +595,9 @@ for profile in json.load(open(profiles_path, encoding="utf-8")).get("profiles", 
         seen.append(raw)
 if not seen:
     sys.exit(0)
+
+with open(secrets_path, "w", encoding="utf-8") as f:
+    f.write("\n".join(seen) + "\n")
 
 lines = []
 if os.path.isfile(env_path):
@@ -611,7 +614,6 @@ while lines and not lines[-1].strip():
     lines.pop()
 
 lines.append(f"MTPROXY_SECRET={seen[0]}")
-lines.append(f"MTPROXY_SECRETS={' '.join(seen)}")
 
 with open(env_path, "w", encoding="utf-8") as f:
     f.write("\n".join(lines) + "\n")
@@ -619,6 +621,9 @@ PY
         [ -f /etc/mtproxy/mtproxy.env ] && \
             chown root:mtproxy /etc/mtproxy/mtproxy.env && \
             chmod 0440 /etc/mtproxy/mtproxy.env
+        [ -f /etc/mtproxy/mtproxy.secrets ] && \
+            chown root:mtproxy /etc/mtproxy/mtproxy.secrets && \
+            chmod 0440 /etc/mtproxy/mtproxy.secrets
     fi
     systemctl daemon-reload
     systemctl restart mtproxy.service 2>/dev/null || true
@@ -635,6 +640,7 @@ BACKUP_DIR=$install_dir/backup
 BACKUP_KEEP=100
 MTPROXY_SERVICE_NAME=mtproxy
 MTPROXY_ENV_FILE=/etc/mtproxy/mtproxy.env
+MTPROXY_SECRETS_FILE=/etc/mtproxy/mtproxy.secrets
 EOF
 install -m 0600 -o root -g root "$apply_profiles_env_tmp" /opt/tgproxy-panel/apply-profiles.env
 

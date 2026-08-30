@@ -15,7 +15,8 @@ Reference copies of upstream tproxy-server files (for Caddyfile patcher / profil
 | `/etc/tproxy-server/config.json` | read-only | Global limits; never modified |
 | `/etc/caddy/Caddyfile` | patch once at install | Adds secret path → `:9000` |
 | `tproxy-server` systemd unit | restart only | No live reload; restarts drop all sessions |
-| `mtproxy.env` (`/etc/mtproxy/mtproxy.env`) | **write** (via sudo script) | `MTPROXY_SECRETS` — one `-S` per profile secret on the shared MTProxy |
+| `mtproxy.env` (`/etc/mtproxy/mtproxy.env`) | **write** (via sudo script) | Workers/limits + one `MTPROXY_SECRET` (default profile) |
+| `mtproxy.secrets` (`/etc/mtproxy/mtproxy.secrets`) | **write** (via sudo script) | One secret per line → separate `-S` flags on MTProxy |
 | SQLite `panel.db` | full ownership | Users, settings, audit |
 
 Panel does **not** spawn per-user MTProxy processes. Every issued profile points at the
@@ -133,7 +134,7 @@ tgproxy-panel ALL=(root) NOPASSWD: /opt/tgproxy-panel/bin/apply-profiles.sh
    profiles.json: keep every non-panel profile unchanged (e.g. upstream `default`),
    replace all panel-managed entries with the candidate list
 3. Backup current profiles → `$BACKUP_DIR/profiles.json.<UTC>.bak`
-4. Sync MTProxy `-S` secrets from merged profiles → `MTPROXY_SECRETS` in `/etc/mtproxy/mtproxy.env`; restart `mtproxy` if changed
+4. Sync MTProxy secrets from merged profiles → `/etc/mtproxy/mtproxy.secrets` (one per line, each becomes `-S`); keep a single `MTPROXY_SECRET` in `mtproxy.env`; restart `mtproxy` if changed
 5. Rotate backups (keep last `BACKUP_KEEP`)
 6. Atomic install to `$TPROXY_PROFILES_PATH` with correct owner/mode
 7. `systemctl restart tproxy-server`

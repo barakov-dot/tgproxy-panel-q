@@ -70,6 +70,7 @@
 #                     BACKUP_KEEP=100
 #                     MTPROXY_SERVICE_NAME=mtproxy
 #                     MTPROXY_ENV_FILE=/etc/mtproxy/mtproxy.env
+#                     MTPROXY_SECRETS_FILE=/etc/mtproxy/mtproxy.secrets
 #   Variable names: must match exactly (same spelling as internal/config's
 #                   env vars for the overlapping settings). Any subset may
 #                   be present; unset ones keep their hardcoded default
@@ -96,6 +97,7 @@ BACKUP_DIR="/opt/tgproxy-panel/backup"
 BACKUP_KEEP=100
 MTPROXY_SERVICE_NAME="mtproxy"
 MTPROXY_ENV_FILE="/etc/mtproxy/mtproxy.env"
+MTPROXY_SECRETS_FILE="/etc/mtproxy/mtproxy.secrets"
 
 # install.sh-generated overrides, if present.
 ENV_FILE="/opt/tgproxy-panel/apply-profiles.env"
@@ -329,7 +331,7 @@ sync_mtproxy_secrets() {
     if ! count="$(python3 - "$profiles_path" "$MTPROXY_ENV_FILE" "$secrets_tmp" "$env_tmp" <<'PY'
 import json, os, re, sys
 
-profiles_path, env_path, secrets_cmp_path, env_out_path = sys.argv[1:5]
+profiles_path, env_path, secrets_out_path, env_out_path = sys.argv[1:5]
 secret_re = re.compile(r"^(?:dd)?[0-9a-f]{32}$")
 
 seen = []
@@ -348,7 +350,7 @@ if not seen:
     print("profiles.json contains no secrets for MTProxy sync", file=sys.stderr)
     sys.exit(1)
 
-with open(secrets_cmp_path, "w", encoding="utf-8") as f:
+with open(secrets_out_path, "w", encoding="utf-8") as f:
     f.write("\n".join(seen) + "\n")
 
 lines = []
@@ -365,8 +367,9 @@ if os.path.isfile(env_path):
 while lines and not lines[-1].strip():
     lines.pop()
 
+# mtproxy.env: exactly one secret (default/first). Additional secrets live in
+# mtproxy.secrets and are passed as separate `-S` flags by mtproxy-exec.sh.
 lines.append(f"MTPROXY_SECRET={seen[0]}")
-lines.append(f"MTPROXY_SECRETS={' '.join(seen)}")
 
 with open(env_out_path, "w", encoding="utf-8") as f:
     f.write("\n".join(lines) + "\n")
@@ -378,54 +381,21 @@ PY
         die "failed to sync MTProxy secrets from merged profiles"
     fi
 
-    if [ -f "$MTPROXY_ENV_FILE" ]; then
-        current_secrets_tmp="$(mktemp "${BACKUP_DIR}/.mtproxy-secrets-current.XXXXXX")"
-        if python3 - "$MTPROXY_ENV_FILE" "$current_secrets_tmp" <<'PY'
-import os, sys
-
-env_path, out_path = sys.argv[1:3]
-seen = []
-if os.path.isfile(env_path):
-    with open(env_path, encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped.startswith("MTPROXY_SECRETS="):
-                for secret in stripped.split("=", 1)[1].split():
-                    secret = secret.strip().lower()
-                    if secret and secret not in seen:
-                        seen.append(secret)
-                break
-    if not seen:
-        with open(env_path, encoding="utf-8") as f:
-            for line in f:
-                stripped = line.strip()
-                if stripped.startswith("MTPROXY_SECRET="):
-                    secret = stripped.split("=", 1)[1].strip().lower()
-                    if secret:
-                        seen.append(secret)
-                    break
-
-with open(out_path, "w", encoding="utf-8") as f:
-    f.write("\n".join(seen) + "\n")
-PY
-        then
-            if cmp -s "$secrets_tmp" "$current_secrets_tmp"; then
-                rm -f "$secrets_tmp" "$env_tmp" "$current_secrets_tmp"
-                info "MTProxy secrets unchanged ($count secret(s))"
-                return 0
-            fi
-        fi
-        rm -f "$current_secrets_tmp"
+    if [ -f "$MTPROXY_SECRETS_FILE" ] && cmp -s "$secrets_tmp" "$MTPROXY_SECRETS_FILE"; then
+        rm -f "$secrets_tmp" "$env_tmp"
+        info "MTProxy secrets unchanged ($count secret(s))"
+        return 0
     fi
 
     install -d -m 0750 -o root -g mtproxy /etc/mtproxy
-    # Atomic install in-place: plain `install` unlinks the target first, which
-    # fails under ProtectSystem=strict unless /etc/mtproxy is in ReadWritePaths.
+    secrets_live_tmp="${MTPROXY_SECRETS_FILE}.tmp.$$"
+    install -m 0440 -o root -g mtproxy "$secrets_tmp" "$secrets_live_tmp"
+    mv -f "$secrets_live_tmp" "$MTPROXY_SECRETS_FILE"
     env_live_tmp="${MTPROXY_ENV_FILE}.tmp.$$"
     install -m 0440 -o root -g mtproxy "$env_tmp" "$env_live_tmp"
     mv -f "$env_live_tmp" "$MTPROXY_ENV_FILE"
     rm -f "$secrets_tmp" "$env_tmp"
-    info "updated $MTPROXY_ENV_FILE ($count secret(s))"
+    info "updated $MTPROXY_SECRETS_FILE and $MTPROXY_ENV_FILE ($count secret(s))"
 
     if ! systemctl daemon-reload; then
         die "systemctl daemon-reload failed after MTProxy secrets update"
