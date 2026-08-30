@@ -127,12 +127,12 @@ func TestApprove(t *testing.T) {
 			wantErr: ErrAlreadyActive,
 		},
 		{
-			name: "not pending",
+			name: "reissues denied",
 			setup: func(fs *fakeStore) int64 {
 				u := fs.addUser(&models.User{TelegramID: 113, Status: models.StatusDenied})
 				return u.ID
 			},
-			wantErr: ErrNotPending,
+			wantActive: true,
 		},
 	}
 

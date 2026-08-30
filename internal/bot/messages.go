@@ -3,6 +3,7 @@ package bot
 import (
 	"fmt"
 	"html"
+	"strings"
 )
 
 // Message copy (plan.md §6: emoji icons, HTML formatting, inline
@@ -47,8 +48,10 @@ func escapeHTML(s string) string {
 }
 
 // proxyLink builds the tappable t.me proxy link (plan.md §5's exact
-// format).
+// format). Hostname must match tproxy-server config.json public_hostname.
 func proxyLink(host, secret string) string {
+	host = strings.ToLower(strings.TrimSpace(host))
+	secret = strings.ToLower(strings.TrimSpace(secret))
 	return fmt.Sprintf("https://t.me/webproxy?server=%s&secret=%s", host, secret)
 }
 

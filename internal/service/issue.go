@@ -54,10 +54,10 @@ func (s *Service) Approve(ctx context.Context, userID int64, actor string) (*mod
 	if u.Status == models.StatusActive {
 		return u, ErrAlreadyActive
 	}
-	if u.Status != models.StatusPending {
-		return u, ErrNotPending
+	if u.Status == models.StatusPending || u.Status == models.StatusRevoked || u.Status == models.StatusDenied {
+		return s.Issue(ctx, u, actor)
 	}
-	return s.Issue(ctx, u, actor)
+	return u, ErrNotPending
 }
 
 func (s *Service) rollbackIssue(ctx context.Context, userID int64, prevStatus models.UserStatus) error {

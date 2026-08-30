@@ -3,8 +3,8 @@ package models
 
 import (
 	"fmt"
-	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -71,12 +71,14 @@ func (u *User) DisplayName() string {
 }
 
 // ProxyLink builds the t.me/webproxy deep link when hostname and secret are set.
+// Hostname must match config.json public_hostname exactly (lowercase ASCII).
 func (u *User) ProxyLink(hostname string) string {
 	if hostname == "" || u.Secret == nil || *u.Secret == "" {
 		return ""
 	}
-	return fmt.Sprintf("https://t.me/webproxy?server=%s&secret=%s",
-		url.QueryEscape(hostname), url.QueryEscape(*u.Secret))
+	host := strings.ToLower(strings.TrimSpace(hostname))
+	secret := strings.ToLower(strings.TrimSpace(*u.Secret))
+	return fmt.Sprintf("https://t.me/webproxy?server=%s&secret=%s", host, secret)
 }
 
 // HasProfile reports whether profile_name and secret are both set.

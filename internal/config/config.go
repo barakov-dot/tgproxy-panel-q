@@ -112,6 +112,9 @@ func loadFromEnv() (*Config, error) {
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("config: %w", errors.Join(errs...))
 	}
+	if err := syncPublicHostname(cfg); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 

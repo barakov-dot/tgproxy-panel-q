@@ -255,6 +255,8 @@ if [ -e "$TPROXY_PROFILES_PATH" ]; then
     current_for_merge="$TPROXY_PROFILES_PATH"
 fi
 
+panel_candidate="$candidate"
+
 if ! merge_profiles "$current_for_merge" "$candidate" "$merged_tmp"; then
     die "failed to merge candidate with existing profiles.json"
 fi
@@ -327,10 +329,35 @@ fi
 mv -f -- "$tmp_install" "$TPROXY_PROFILES_PATH"
 tmp_install=""
 profile_count="?"
+profile_names=""
 if command -v python3 >/dev/null 2>&1; then
     profile_count="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(len(d.get("profiles", [])))' "$TPROXY_PROFILES_PATH" 2>/dev/null || echo '?')"
+    profile_names="$(python3 - "$TPROXY_PROFILES_PATH" "$panel_candidate" <<'PY' 2>/dev/null || true
+import json, sys
+
+installed_path, panel_candidate_path = sys.argv[1:3]
+with open(installed_path, encoding="utf-8") as f:
+    installed = json.load(f)
+with open(panel_candidate_path, encoding="utf-8") as f:
+    panel = json.load(f)
+
+installed_names = {p.get("name") for p in installed.get("profiles", [])}
+missing = []
+for p in panel.get("profiles", []):
+    name = p.get("name")
+    if name and name not in installed_names:
+        missing.append(name)
+if missing:
+    print("MISSING:" + ",".join(missing))
+    sys.exit(1)
+print(",".join(sorted(n for n in installed_names if n)))
+PY
+)"
+    if [[ "$profile_names" == MISSING:* ]]; then
+        die "installed profiles.json is missing panel profile(s): ${profile_names#MISSING:}"
+    fi
 fi
-info "installed new profiles.json ($profile_count profile(s)) at $TPROXY_PROFILES_PATH"
+info "installed new profiles.json ($profile_count profile(s)) at $TPROXY_PROFILES_PATH${profile_names:+, names: $profile_names}"
 
 # --- 7. Restart tproxy-server ---
 

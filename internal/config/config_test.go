@@ -54,12 +54,34 @@ func setEnv(t *testing.T, env map[string]string) {
 	}
 }
 
+func writeTestTproxyConfig(t *testing.T, dir, hostname string) string {
+	t.Helper()
+	path := filepath.Join(dir, "config.json")
+	content := `{"public_hostname":"` + hostname + `"}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func setValidEnv(t *testing.T) map[string]string {
+	t.Helper()
+	dir := t.TempDir()
+	env := validEnv()
+	env["TPROXY_CONFIG_PATH"] = writeTestTproxyConfig(t, dir, "proxy.example.com")
+	setEnv(t, env)
+	return env
+}
+
 func TestLoad_Valid(t *testing.T) {
-	setEnv(t, validEnv())
+	setValidEnv(t)
 
 	cfg, err := loadFromEnv()
 	if err != nil {
 		t.Fatalf("loadFromEnv() error: %v", err)
+	}
+	if cfg.TproxyHostname != "proxy.example.com" {
+		t.Errorf("TproxyHostname = %q, want public_hostname from config.json", cfg.TproxyHostname)
 	}
 	if cfg.PanelPort != 9000 {
 		t.Errorf("PanelPort = %d, want 9000", cfg.PanelPort)
@@ -82,6 +104,7 @@ func TestLoadFromDotEnv(t *testing.T) {
 	setEnv(t, map[string]string{})
 
 	dir := t.TempDir()
+	configPath := writeTestTproxyConfig(t, dir, "proxy.example.com")
 	envPath := filepath.Join(dir, ".env")
 	content := `# panel
 PANEL_PORT=9000
@@ -92,10 +115,10 @@ SESSION_SECRET=0123456789abcdef0123456789abcdef
 BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 ADMIN_TELEGRAM_ID=123456789
 AUTO_ISSUE=true
-TPROXY_HOSTNAME=proxy.example.com
+TPROXY_HOSTNAME=wrong.example.com
 TPROXY_SERVICE_NAME=tproxy-server
 TPROXY_PROFILES_PATH=/etc/tproxy-server/profiles.json
-TPROXY_CONFIG_PATH=/etc/tproxy-server/config.json
+TPROXY_CONFIG_PATH=` + configPath + `
 TPROXY_ADMIN_URL=http://127.0.0.1:8081
 CADDYFILE_PATH=/etc/caddy/Caddyfile
 TPROXY_BACKEND=127.0.0.1:2398
@@ -119,6 +142,9 @@ LOG_FORMAT=text
 	}
 	if cfg.LogFormat != "text" {
 		t.Errorf("LogFormat = %q, want text", cfg.LogFormat)
+	}
+	if cfg.TproxyHostname != "proxy.example.com" {
+		t.Errorf("TproxyHostname = %q, want public_hostname from config.json", cfg.TproxyHostname)
 	}
 }
 
@@ -169,7 +195,9 @@ func TestLoad_InvalidFields(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
 			env := validEnv()
+			env["TPROXY_CONFIG_PATH"] = writeTestTproxyConfig(t, dir, "proxy.example.com")
 			env[tc.key] = tc.value
 			setEnv(t, env)
 			_, err := loadFromEnv()
