@@ -10,7 +10,11 @@ A single Go binary (HTTP panel + Telegram bot, one process, systemd-managed) tha
 and revokes proxy access for an **already-installed** `tproxy-server`. It never touches
 tproxy-server's relay logic, MTProxy, or `config.json`. Its entire write surface on the
 target host is: `profiles.json`, one line in `Caddyfile`, and `systemctl restart
-tproxy-server` / `systemctl reload caddy`.
+tproxy-server` / `systemctl restart caddy` — restart, not reload: confirmed against a real
+install that tproxy-server's own `deploy/caddy.service` unit defines no `ExecReload=`, so
+`systemctl reload caddy` fails outright ("Job type reload is not applicable"), and the
+Caddyfile's `admin off` rules out `caddy reload`'s CLI too (it needs the admin API, which is
+deliberately disabled). See `deploy/install.sh`'s own comment at the restart call for detail.
 
 ## Verified facts about tproxy-server (do not re-derive, do not guess)
 

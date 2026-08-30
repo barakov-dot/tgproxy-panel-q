@@ -438,9 +438,26 @@ if ! TPROXY_HOSTNAME="$tproxy_hostname" TPROXY_SITE_ROOT="$validate_site_root" A
     die "caddy validate failed against the patched Caddyfile. The live file at $caddyfile_path was NOT modified (a pre-patch copy is saved at $caddyfile_backup, though nothing needs restoring since nothing was written)."
 fi
 
+# A restart, not a reload: tproxy-server's own deploy/caddy.service unit
+# (installed by tproxy-server's installer, not this project) defines no
+# ExecReload=, so `systemctl reload caddy` fails outright with "Job type
+# reload is not applicable for unit caddy.service" — confirmed against a
+# real install. The Caddyfile's own global options block also sets
+# `admin off`, which rules out `caddy reload`'s CLI (it talks to the local
+# admin API to push a live config, and that API is deliberately disabled)
+# as an alternative. A restart is the only supported way to make this
+# specific unit pick up a changed Caddyfile; it's brief (sub-second,
+# in-memory TLS state is unaffected since certificates are cached on disk)
+# and happens once here at install time, not on every issue/revoke like
+# tproxy-server's own unavoidable restart.
 cp -- "$patched_tmp" "$caddyfile_path"
-systemctl reload caddy
-info "Caddyfile patched, validated, and Caddy reloaded"
+if ! systemctl restart caddy; then
+    echo "install.sh: systemctl restart caddy failed, restoring the pre-patch Caddyfile from $caddyfile_backup" >&2
+    cp -- "$caddyfile_backup" "$caddyfile_path"
+    systemctl restart caddy || true
+    die "systemctl restart caddy failed after installing the patched Caddyfile; restored the previous Caddyfile from $caddyfile_backup and re-attempted a restart with it. Check 'systemctl status caddy' and 'journalctl -u caddy' before re-running this installer."
+fi
+info "Caddyfile patched, validated, and Caddy restarted"
 
 # --- 11. tgproxy-panel system user/group (idempotent) ---
 
