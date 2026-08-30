@@ -1,4 +1,4 @@
-package httpserver
+package service
 
 import (
 	"context"
@@ -11,14 +11,20 @@ import (
 	"github.com/barakov-dot/tgproxy-panel/internal/store"
 )
 
-// fakeStore is an in-memory userStore for tests, avoiding a real SQLite
-// file for anything that doesn't specifically want one.
+// fakeStore is an in-memory Store for tests, avoiding a real SQLite file
+// for anything that doesn't specifically want one. Combines what the
+// pre-consolidation internal/httpserver and internal/bot fakes each needed.
 type fakeStore struct {
 	mu       sync.Mutex
 	nextID   int64
 	users    map[int64]*models.User // keyed by telegram_id
 	settings map[string]string
 	audit    []models.AuditLog
+
+	createErr     error
+	issueErr      error
+	denyErr       error
+	getSettingErr error
 }
 
 func newFakeStore() *fakeStore {
@@ -35,7 +41,7 @@ func (f *fakeStore) addUser(u *models.User) *models.User {
 	return &cp
 }
 
-func (f *fakeStore) GetUserByID(ctx context.Context, id int64) (*models.User, error) {
+func (f *fakeStore) GetUserByID(_ context.Context, id int64) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, u := range f.users {
@@ -47,7 +53,7 @@ func (f *fakeStore) GetUserByID(ctx context.Context, id int64) (*models.User, er
 	return nil, store.ErrNotFound
 }
 
-func (f *fakeStore) GetUserByTelegramID(ctx context.Context, telegramID int64) (*models.User, error) {
+func (f *fakeStore) GetUserByTelegramID(_ context.Context, telegramID int64) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u, ok := f.users[telegramID]
@@ -58,9 +64,12 @@ func (f *fakeStore) GetUserByTelegramID(ctx context.Context, telegramID int64) (
 	return &cp, nil
 }
 
-func (f *fakeStore) CreateUser(ctx context.Context, telegramID int64, username, firstName, lastName *string) (*models.User, error) {
+func (f *fakeStore) CreateUser(_ context.Context, telegramID int64, username, firstName, lastName *string) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
 	f.nextID++
 	now := time.Now()
 	u := &models.User{
@@ -73,21 +82,7 @@ func (f *fakeStore) CreateUser(ctx context.Context, telegramID int64, username, 
 	return &cp, nil
 }
 
-func (f *fakeStore) SetPending(ctx context.Context, telegramID int64) (*models.User, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	u, ok := f.users[telegramID]
-	if !ok {
-		return nil, store.ErrNotFound
-	}
-	now := time.Now()
-	u.Status = models.StatusPending
-	u.RequestedAt = &now
-	cp := *u
-	return &cp, nil
-}
-
-func (f *fakeStore) ListUsers(ctx context.Context) ([]*models.User, error) {
+func (f *fakeStore) ListUsers(_ context.Context) ([]*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]*models.User, 0, len(f.users))
@@ -98,9 +93,12 @@ func (f *fakeStore) ListUsers(ctx context.Context) ([]*models.User, error) {
 	return out, nil
 }
 
-func (f *fakeStore) IssueUser(ctx context.Context, telegramID int64, profileName, secret string) (*models.User, error) {
+func (f *fakeStore) IssueUser(_ context.Context, telegramID int64, profileName, secret string) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.issueErr != nil {
+		return nil, f.issueErr
+	}
 	u, ok := f.users[telegramID]
 	if !ok {
 		return nil, store.ErrNotFound
@@ -114,7 +112,7 @@ func (f *fakeStore) IssueUser(ctx context.Context, telegramID int64, profileName
 	return &cp, nil
 }
 
-func (f *fakeStore) RevokeUser(ctx context.Context, telegramID int64) (*models.User, error) {
+func (f *fakeStore) RevokeUser(_ context.Context, telegramID int64) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	u, ok := f.users[telegramID]
@@ -130,9 +128,12 @@ func (f *fakeStore) RevokeUser(ctx context.Context, telegramID int64) (*models.U
 	return &cp, nil
 }
 
-func (f *fakeStore) DenyUser(ctx context.Context, telegramID int64) (*models.User, error) {
+func (f *fakeStore) DenyUser(_ context.Context, telegramID int64) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.denyErr != nil {
+		return nil, f.denyErr
+	}
 	u, ok := f.users[telegramID]
 	if !ok {
 		return nil, store.ErrNotFound
@@ -142,48 +143,73 @@ func (f *fakeStore) DenyUser(ctx context.Context, telegramID int64) (*models.Use
 	return &cp, nil
 }
 
-func (f *fakeStore) GetSetting(ctx context.Context, key string) (string, bool, error) {
+func (f *fakeStore) SetPending(_ context.Context, telegramID int64) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	u, ok := f.users[telegramID]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	now := time.Now()
+	u.Status = models.StatusPending
+	u.RequestedAt = &now
+	cp := *u
+	return &cp, nil
+}
+
+func (f *fakeStore) GetSetting(_ context.Context, key string) (string, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getSettingErr != nil {
+		return "", false, f.getSettingErr
+	}
 	v, ok := f.settings[key]
 	return v, ok, nil
 }
 
-func (f *fakeStore) SetSetting(ctx context.Context, key, value string) error {
+func (f *fakeStore) SetSetting(_ context.Context, key, value string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.settings[key] = value
 	return nil
 }
 
-func (f *fakeStore) WriteAuditLog(ctx context.Context, entry models.AuditLog) error {
+func (f *fakeStore) WriteAuditLog(_ context.Context, entry models.AuditLog) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.audit = append(f.audit, entry)
 	return nil
 }
 
-// fakeApplier is an in-memory profileApplier for tests. Set IssueErr/RevokeErr
-// to force a failure path.
+// fakeApplier is an in-memory Applier for tests. Set IssueErr/RevokeErr to
+// force a failure path.
 type fakeApplier struct {
 	mu          sync.Mutex
 	IssueErr    error
 	RevokeErr   error
 	IssueCalls  int
 	RevokeCalls int
+	calls       []applierCall
 }
 
-func (f *fakeApplier) IssueProfile(ctx context.Context, telegramID int64, profileName, secret string) (*applier.Result, error) {
+type applierCall struct {
+	TelegramID  int64
+	ProfileName string
+	Secret      string
+}
+
+func (f *fakeApplier) IssueProfile(_ context.Context, telegramID int64, profileName, secret string) (*applier.Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.IssueCalls++
+	f.calls = append(f.calls, applierCall{telegramID, profileName, secret})
 	if f.IssueErr != nil {
 		return nil, f.IssueErr
 	}
 	return &applier.Result{ProfileCount: 1}, nil
 }
 
-func (f *fakeApplier) RevokeProfile(ctx context.Context, telegramID int64) (*applier.Result, error) {
+func (f *fakeApplier) RevokeProfile(_ context.Context, telegramID int64) (*applier.Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.RevokeCalls++
@@ -194,3 +220,13 @@ func (f *fakeApplier) RevokeProfile(ctx context.Context, telegramID int64) (*app
 }
 
 var errForced = fmt.Errorf("forced test error")
+
+func testActions(st *fakeStore, ap *fakeApplier, defaultAutoIssue bool) *Actions {
+	return &Actions{
+		Store:            st,
+		Applier:          ap,
+		DefaultAutoIssue: defaultAutoIssue,
+		GenSecret:        func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil },
+		ProfileName:      func(id int64) string { return fmt.Sprintf("user_%d", id) },
+	}
+}

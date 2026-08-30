@@ -14,6 +14,7 @@ import (
 	"github.com/barakov-dot/tgproxy-panel/internal/config"
 	"github.com/barakov-dot/tgproxy-panel/internal/models"
 	"github.com/barakov-dot/tgproxy-panel/internal/qrcode"
+	"github.com/barakov-dot/tgproxy-panel/internal/service"
 	"github.com/barakov-dot/tgproxy-panel/internal/store"
 )
 
@@ -38,15 +39,16 @@ type Sender interface {
 }
 
 // Bot wires Telegram-specific plumbing (updates, keyboards, HTML messages)
-// around Actions, the framework-agnostic orchestration layer in actions.go.
+// around internal/service.Actions, the framework-agnostic orchestration
+// layer shared with internal/httpserver.
 type Bot struct {
 	sender          Sender
-	actions         *Actions
+	actions         *service.Actions
 	adminTelegramID int64
 	proxyHost       string
 }
 
-func newBot(sender Sender, actions *Actions, adminTelegramID int64, proxyHost string) *Bot {
+func newBot(sender Sender, actions *service.Actions, adminTelegramID int64, proxyHost string) *Bot {
 	return &Bot{
 		sender:          sender,
 		actions:         actions,
@@ -65,7 +67,7 @@ func Run(ctx context.Context, cfg *config.Config, st *store.Store, ap *applier.A
 		return fmt.Errorf("bot: init: %w", err)
 	}
 
-	actions := NewActions(st, ap, cfg.AutoIssue)
+	actions := service.New(st, ap, cfg.AutoIssue)
 	b := newBot(api, actions, cfg.AdminTelegramID, cfg.TproxyHostname)
 
 	uCfg := tgbotapi.NewUpdate(0)
@@ -145,14 +147,14 @@ func (b *Bot) handleGetProxy(ctx context.Context, cq *tgbotapi.CallbackQuery) {
 	}
 
 	switch res.Outcome {
-	case OutcomeAlreadyActive:
+	case service.OutcomeAlreadyActive:
 		b.sendProxy(chatID, res.User, existingProxyText)
-	case OutcomeIssued:
+	case service.OutcomeIssued:
 		b.sendProxy(chatID, res.User, issuedProxyText)
-	case OutcomePendingCreated:
+	case service.OutcomePendingCreated:
 		b.send(htmlMessage(chatID, pendingText))
 		b.notifyAdmin(res.User)
-	case OutcomeAlreadyPending:
+	case service.OutcomeAlreadyPending:
 		b.send(htmlMessage(chatID, alreadyPendingText))
 	}
 }
@@ -176,7 +178,7 @@ func (b *Bot) handleAdminDecision(ctx context.Context, cq *tgbotapi.CallbackQuer
 	}
 
 	if approve {
-		u, err := b.actions.Approve(ctx, telegramID, cq.From.ID)
+		u, err := b.actions.Approve(ctx, telegramID, service.ActorAdmin(cq.From.ID))
 		if err != nil {
 			b.reportAdminActionError(cq, err)
 			return
@@ -185,7 +187,7 @@ func (b *Bot) handleAdminDecision(ctx context.Context, cq *tgbotapi.CallbackQuer
 		b.send(htmlMessage(cq.Message.Chat.ID, approvedAdminConfirmText(u.DisplayName())))
 		b.sendProxy(u.TelegramID, u, issuedProxyText)
 	} else {
-		u, err := b.actions.Deny(ctx, telegramID, cq.From.ID)
+		u, err := b.actions.Deny(ctx, telegramID, service.ActorAdmin(cq.From.ID))
 		if err != nil {
 			b.reportAdminActionError(cq, err)
 			return
@@ -257,7 +259,7 @@ func (b *Bot) clearAdminKeyboard(cq *tgbotapi.CallbackQuery) {
 func (b *Bot) reportError(chatID int64, err error) {
 	slog.Error("bot: request failed", "error", err)
 	text := genericErrorText
-	if errors.Is(err, ErrApplyFailed) {
+	if errors.Is(err, service.ErrIssueFailed) {
 		text = applyFailedText
 	}
 	b.send(htmlMessage(chatID, text))
@@ -266,7 +268,7 @@ func (b *Bot) reportError(chatID int64, err error) {
 func (b *Bot) reportAdminActionError(cq *tgbotapi.CallbackQuery, err error) {
 	slog.Error("bot: admin decision failed", "error", err)
 	text := genericErrorText
-	if errors.Is(err, ErrApplyFailed) {
+	if errors.Is(err, service.ErrIssueFailed) {
 		text = applyFailedText
 	}
 	b.send(htmlMessage(cq.Message.Chat.ID, text))

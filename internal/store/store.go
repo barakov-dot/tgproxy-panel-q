@@ -241,6 +241,25 @@ func (s *Store) DenyUser(ctx context.Context, telegramID int64) (*models.User, e
 	return s.GetUserByTelegramID(ctx, telegramID)
 }
 
+// SetPending resets telegramID's row to a fresh pending request:
+// status=pending, requested_at=now. Used when a previously revoked or
+// denied user re-requests access with auto-issue off, so the request
+// reappears in the panel's pending queue and an admin decision is expected
+// again, instead of silently staying revoked/denied while a notification is
+// sent (see internal/service.RequestProxy).
+func (s *Store) SetPending(ctx context.Context, telegramID int64) (*models.User, error) {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE users SET status = ?, requested_at = ? WHERE telegram_id = ?`,
+		string(models.StatusPending), formatTime(time.Now()), telegramID)
+	if err != nil {
+		return nil, fmt.Errorf("store: set pending telegram_id=%d: %w", telegramID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	return s.GetUserByTelegramID(ctx, telegramID)
+}
+
 // GetSetting returns a setting's value and whether it was found.
 func (s *Store) GetSetting(ctx context.Context, key string) (string, bool, error) {
 	var value string

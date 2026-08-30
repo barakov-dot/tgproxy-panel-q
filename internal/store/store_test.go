@@ -249,6 +249,41 @@ func TestDenyUser(t *testing.T) {
 	}
 }
 
+func TestSetPending_ReopensRevokedUser(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.CreateUser(ctx, 9, nil, nil, nil); err != nil {
+		t.Fatalf("CreateUser() error: %v", err)
+	}
+	if _, err := s.IssueUser(ctx, 9, "user_9", "0123456789abcdef0123456789abcdef"); err != nil {
+		t.Fatalf("IssueUser() error: %v", err)
+	}
+	if _, err := s.RevokeUser(ctx, 9); err != nil {
+		t.Fatalf("RevokeUser() error: %v", err)
+	}
+
+	pending, err := s.SetPending(ctx, 9)
+	if err != nil {
+		t.Fatalf("SetPending() error: %v", err)
+	}
+	if pending.Status != models.StatusPending {
+		t.Errorf("Status = %q, want pending", pending.Status)
+	}
+	if pending.RequestedAt == nil {
+		t.Error("RequestedAt should be set after SetPending")
+	}
+}
+
+func TestSetPending_NotFound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	if _, err := s.SetPending(ctx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SetPending() error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestSettings_GetSet(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

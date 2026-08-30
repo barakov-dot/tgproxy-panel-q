@@ -1,4 +1,4 @@
-package httpserver
+package service
 
 import (
 	"context"
@@ -8,19 +8,11 @@ import (
 	"github.com/barakov-dot/tgproxy-panel/internal/models"
 )
 
-func newTestActions(fs *fakeStore, fa *fakeApplier) *Actions {
-	return &Actions{
-		Store:     fs,
-		Applier:   fa,
-		GenSecret: func() (string, error) { return "deadbeefdeadbeefdeadbeefdeadbeef", nil },
-	}
-}
-
 func TestApproveIssuesProfile(t *testing.T) {
 	fs := newFakeStore()
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusPending})
 	fa := &fakeApplier{}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	u, err := a.Approve(context.Background(), 111, "test-admin")
 	if err != nil {
@@ -45,7 +37,7 @@ func TestApproveAlreadyActive(t *testing.T) {
 	secret := "abc"
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusActive, Secret: &secret})
 	fa := &fakeApplier{}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	_, err := a.Approve(context.Background(), 111, "test-admin")
 	if !errors.Is(err, ErrAlreadyActive) {
@@ -62,7 +54,7 @@ func TestApproveRollsBackOnApplierFailure(t *testing.T) {
 	fs := newFakeStore()
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusPending})
 	fa := &fakeApplier{IssueErr: errForced}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	_, err := a.Approve(context.Background(), 111, "test-admin")
 	if !errors.Is(err, ErrIssueFailed) {
@@ -95,7 +87,7 @@ func TestApproveReissuesRevokedUser(t *testing.T) {
 	fs := newFakeStore()
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusRevoked})
 	fa := &fakeApplier{}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	u, err := a.Approve(context.Background(), 111, "test-admin")
 	if err != nil {
@@ -112,7 +104,7 @@ func TestRevokeClearsProfile(t *testing.T) {
 	name := "user_111"
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusActive, Secret: &secret, ProfileName: &name})
 	fa := &fakeApplier{}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	u, err := a.Revoke(context.Background(), 111, "test-admin")
 	if err != nil {
@@ -133,7 +125,7 @@ func TestRevokeNotActive(t *testing.T) {
 	fs := newFakeStore()
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusPending})
 	fa := &fakeApplier{}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	_, err := a.Revoke(context.Background(), 111, "test-admin")
 	if !errors.Is(err, ErrNotActive) {
@@ -146,7 +138,7 @@ func TestRevokeApplyFailureIsSurfacedNotHidden(t *testing.T) {
 	secret := "abc"
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusActive, Secret: &secret})
 	fa := &fakeApplier{RevokeErr: errForced}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	_, err := a.Revoke(context.Background(), 111, "test-admin")
 	if !errors.Is(err, ErrRevokeApplyFailed) {
@@ -173,7 +165,7 @@ func TestDenyPending(t *testing.T) {
 	fs := newFakeStore()
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusPending})
 	fa := &fakeApplier{}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	u, err := a.Deny(context.Background(), 111, "test-admin")
 	if err != nil {
@@ -191,7 +183,7 @@ func TestDenyNotPending(t *testing.T) {
 	fs := newFakeStore()
 	fs.addUser(&models.User{TelegramID: 111, Status: models.StatusActive})
 	fa := &fakeApplier{}
-	a := newTestActions(fs, fa)
+	a := testActions(fs, fa, false)
 
 	_, err := a.Deny(context.Background(), 111, "test-admin")
 	if !errors.Is(err, ErrNotPending) {

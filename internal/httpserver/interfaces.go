@@ -1,30 +1,14 @@
 package httpserver
 
 import (
-	"context"
-
-	"github.com/barakov-dot/tgproxy-panel/internal/applier"
-	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel/internal/service"
 )
 
-// userStore is the subset of *store.Store this package needs. Defining it
-// here (rather than depending on the concrete *store.Store everywhere) lets
-// handler and orchestration tests run against small in-memory fakes without
-// a real SQLite file. *store.Store satisfies this interface as-is.
-type userStore interface {
-	GetUserByID(ctx context.Context, id int64) (*models.User, error)
-	GetUserByTelegramID(ctx context.Context, telegramID int64) (*models.User, error)
-	ListUsers(ctx context.Context) ([]*models.User, error)
-	IssueUser(ctx context.Context, telegramID int64, profileName, secret string) (*models.User, error)
-	RevokeUser(ctx context.Context, telegramID int64) (*models.User, error)
-	DenyUser(ctx context.Context, telegramID int64) (*models.User, error)
-	GetSetting(ctx context.Context, key string) (string, bool, error)
-	SetSetting(ctx context.Context, key, value string) error
-	WriteAuditLog(ctx context.Context, entry models.AuditLog) error
-}
-
-// profileApplier is the subset of *applier.Applier this package needs.
-type profileApplier interface {
-	IssueProfile(ctx context.Context, telegramID int64, profileName, secret string) (*applier.Result, error)
-	RevokeProfile(ctx context.Context, telegramID int64) (*applier.Result, error)
-}
+// userStore and profileApplier are aliases for internal/service's Store and
+// Applier interfaces: this package's read-only handlers (list/detail/
+// settings) need a subset of Store, and Server.actions (a *service.Actions)
+// needs the whole thing, so there is no reason to keep a separate, narrower
+// interface here — a fake passed to httpserver.New must satisfy the same
+// contract service.New requires anyway.
+type userStore = service.Store
+type profileApplier = service.Applier

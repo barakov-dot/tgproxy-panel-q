@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel/internal/service"
 	"github.com/barakov-dot/tgproxy-panel/internal/store"
 )
 
@@ -181,17 +182,16 @@ func (s *Server) handleDeny(w http.ResponseWriter, r *http.Request) {
 
 // handleNotify is a placeholder for plan.md §5's "отправить пользователю в
 // Telegram" button. Actually sending the message needs a live bot client
-// (internal/bot, built in parallel by a sibling agent and out of scope for
-// this package) wired in through stage 6's internal/service — see this
-// package's report for the exact hookup stage 6 needs to do. Until then this
-// just tells the admin so, rather than silently doing nothing or 404ing.
+// (internal/bot), which cmd/tgproxy-panel/main.go wires up alongside this
+// server — until main.go passes a sender through, this just tells the admin
+// so, rather than silently doing nothing or 404ing.
 func (s *Server) handleNotify(w http.ResponseWriter, r *http.Request) {
 	u, err := s.userByIDParam(r)
 	if err != nil {
 		s.notFoundOrError(w, r, err)
 		return
 	}
-	s.renderUserDetail(w, r, u, "", "Отправка через бота будет доступна после подключения internal/service (этап 6). Пока что скопируйте ссылку вручную.")
+	s.renderUserDetail(w, r, u, "", "Отправка через бота пока не подключена. Скопируйте ссылку вручную.")
 }
 
 // runAction loads the user targeted by the {id} path param, runs action
@@ -224,21 +224,21 @@ func (s *Server) runAction(w http.ResponseWriter, r *http.Request, action func(c
 	s.renderUserDetail(w, r, updated, "Готово.", "")
 }
 
-// userFacingActionError translates the sentinel errors from actions.go into
+// userFacingActionError translates internal/service's sentinel errors into
 // the Russian copy shown on the detail page. Everything else (a real DB or
 // applier error) gets one generic message — the exact cause is logged
 // server-side, not shown to the browser.
 func userFacingActionError(err error) string {
 	switch {
-	case errors.Is(err, ErrAlreadyActive):
+	case errors.Is(err, service.ErrAlreadyActive):
 		return "У пользователя уже есть активный профиль."
-	case errors.Is(err, ErrNotPending):
+	case errors.Is(err, service.ErrNotPending):
 		return "Заявка больше не ожидает рассмотрения."
-	case errors.Is(err, ErrNotActive):
+	case errors.Is(err, service.ErrNotActive):
 		return "У пользователя нет активного профиля для отзыва."
-	case errors.Is(err, ErrIssueFailed):
+	case errors.Is(err, service.ErrIssueFailed):
 		return "Не удалось выдать профиль на сервере. Изменения отменены, повторите попытку или обратитесь к администратору."
-	case errors.Is(err, ErrRevokeApplyFailed):
+	case errors.Is(err, service.ErrRevokeApplyFailed):
 		return "Статус изменён на «отозван», но применить изменения на сервере не удалось. Повторите попытку."
 	default:
 		return "Внутренняя ошибка. Попробуйте ещё раз."

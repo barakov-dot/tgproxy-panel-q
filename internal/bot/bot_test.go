@@ -8,6 +8,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/barakov-dot/tgproxy-panel/internal/models"
+	"github.com/barakov-dot/tgproxy-panel/internal/service"
 )
 
 // fakeSender is a Sender that records every call instead of hitting the
@@ -291,7 +292,7 @@ func TestReportError_ApplyFailedGetsDistinctMessage(t *testing.T) {
 	sender := &fakeSender{}
 	b := testBot(sender, newFakeStore(), &fakeApplier{}, true)
 
-	b.reportError(1, ErrApplyFailed)
+	b.reportError(1, service.ErrIssueFailed)
 	b.reportError(2, errors.New("some other failure"))
 
 	if len(sender.sent) != 2 {
@@ -300,7 +301,7 @@ func TestReportError_ApplyFailedGetsDistinctMessage(t *testing.T) {
 	m1 := sender.sent[0].(tgbotapi.MessageConfig)
 	m2 := sender.sent[1].(tgbotapi.MessageConfig)
 	if m1.Text != applyFailedText {
-		t.Errorf("ErrApplyFailed text = %q, want %q", m1.Text, applyFailedText)
+		t.Errorf("ErrIssueFailed text = %q, want %q", m1.Text, applyFailedText)
 	}
 	if m2.Text != genericErrorText {
 		t.Errorf("generic error text = %q, want %q", m2.Text, genericErrorText)
